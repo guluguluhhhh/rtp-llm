@@ -174,38 +174,34 @@ class ModelFactory:
         model_config: ModelConfig,
         engine_config: EngineConfig,
         world_info,
+        model=None,
         vit_config: Optional[VitConfig] = None,
         merge_lora: bool = False,
         propose_model_config: Optional[ModelConfig] = None,
     ):
-        """Create engine from independent config objects, with optional propose model.
-
-        All model metadata (template_type, model_name, lora_infos, mm_model_config) should be set in model_config before calling this method.
-
-        This replaces from_gpt_config() and returns BaseEngine instead of AsyncModel.
+        """Create engine from config objects, with optional pre-loaded model.
 
         Args:
-            model_config: Model configuration (contains mm_model_config)
+            model_config: Model configuration
             engine_config: Engine configuration
             world_info: WorldInfo instance from DistributedServer
+            model: Pre-loaded model. If None, weights are loaded here.
             vit_config: Optional VitConfig (needed for multimodal models)
             merge_lora: Whether to merge LoRA weights
             propose_model_config: Optional propose model configuration
-            generate_env_config: Optional GenerateEnvConfig for loading default generate config
 
         Returns:
             BaseEngine instance (RPCEngine or EmbeddingCppEngine)
         """
-        # Set gen_num_per_cycle on model_config so it flows to AttentionConfigs
-        # for RoPE cache sizing in speculative decoding
         model_config.gen_num_per_cycle = engine_config.sp_config.gen_num_per_cycle
 
-        model = ModelFactory._create_model(
-            model_config=model_config,
-            engine_config=engine_config,
-            vit_config=vit_config,
-            merge_lora=merge_lora,
-        )
+        if model is None:
+            model = ModelFactory._create_model(
+                model_config=model_config,
+                engine_config=engine_config,
+                vit_config=vit_config,
+                merge_lora=merge_lora,
+            )
 
         model_type = model_config.model_type
         if model_type == "fake_model":
@@ -218,14 +214,12 @@ class ModelFactory:
             logging.info("vit role, continue")
             return model
 
-        # Create propose model if provided
         propose_model = ModelFactory.get_sp_model(
             model_config=model_config,
             propose_model_config=propose_model_config,
             engine_config=engine_config,
         )
 
-        # Create engine using create_engine function (replaces AsyncModel)
         alog_conf_path = engine_config.profiling_debug_logging_config.ft_alog_conf_path
 
         from rtp_llm.async_decoder_engine.engine_creator import create_engine

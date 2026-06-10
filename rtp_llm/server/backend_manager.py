@@ -44,20 +44,34 @@ class BackendManager(object):
     def start(self):
         """Initialize backend server without entering service loop"""
         self._distributed_server.start(self.py_env_configs)
-        # Create EngineConfig from py_env_configs (server/distribute config already adjusted for this rank)
         engine_config = EngineConfig.create(
             self.py_env_configs,
             nccl_comm_config=self._distributed_server.get_nccl_comm_config(),
         )
 
+        # NCCL init in background thread — no data dependency with model config
+        # creation or weight loading, so they run in parallel.
+        nccl_thread = None
+        nccl_error = [None]
+
         if engine_config.parallelism_config.world_size > 1:
-            init_distributed_environment(
-                engine_config.parallelism_config,
-                nccl_comm_config=self._distributed_server.get_nccl_comm_config(),
-                nccl_init_port=self._distributed_server.get_nccl_init_port(),
-                backend="nccl",
-                timeout=self.py_env_configs.distribute_config.dist_comm_timeout,
-            )
+
+            def _init_nccl():
+                try:
+                    init_distributed_environment(
+                        engine_config.parallelism_config,
+                        nccl_comm_config=self._distributed_server.get_nccl_comm_config(),
+                        nccl_init_port=self._distributed_server.get_nccl_init_port(),
+                        backend="nccl",
+                        timeout=self.py_env_configs.distribute_config.dist_comm_timeout,
+                    )
+                except Exception as e:
+                    nccl_error[0] = e
+
+            nccl_thread = threading.Thread(target=_init_nccl, daemon=True)
+            nccl_thread.start()
+
+        # These steps don't depend on NCCL — run while NCCL initializes.
         world_info = get_world_info(
             self.py_env_configs.server_config,
             self.py_env_configs.distribute_config,
@@ -69,7 +83,6 @@ class BackendManager(object):
             engine_config.parallelism_config,
             world_info,
         )
-        # Build main model_config
         model_config = ModelFactory.create_model_config(
             model_args=self.py_env_configs.model_args,
             lora_config=self.py_env_configs.lora_config,
@@ -81,13 +94,26 @@ class BackendManager(object):
             render_config=self.py_env_configs.render_config,
             eplb_config=self.py_env_configs.eplb_config,
         )
-        # Let engine_config finalize based on model_config (e.g. scheduler config)
         ModelFactory.update_engine_config_from_model_config(
             engine_config=engine_config,
             model_config=model_config,
         )
 
-        # Initialize DeepEP/MoriEP wrapper if MOE model and EP is enabled
+        # Weight loading doesn't need NCCL — still parallel with NCCL init.
+        model = ModelFactory._create_model(
+            model_config=model_config,
+            engine_config=engine_config,
+            vit_config=self.py_env_configs.vit_config,
+            merge_lora=self.py_env_configs.lora_config.merge_lora,
+        )
+
+        # Wait for NCCL before anything that needs collective communication.
+        if nccl_thread is not None:
+            nccl_thread.join()
+            if nccl_error[0] is not None:
+                raise nccl_error[0]
+
+        # DeepEP/MoriEP depends on NCCL process groups.
         if (
             model_config.expert_num > 0
             and engine_config.parallelism_config.world_size > 1
@@ -96,7 +122,6 @@ class BackendManager(object):
             deepep_init_success = False
             moriep_init_success = False
 
-            # Initialize DeepEP if enabled
             if engine_config.moe_config.use_deepep_moe:
                 try:
                     from rtp_llm.models_py.distributed.deepep_wrapper import (
@@ -108,7 +133,6 @@ class BackendManager(object):
                 except Exception as e:
                     logging.error(f"Failed to initialize DeepEP wrapper: {e}")
 
-            # Initialize MoriEP if enabled (can be independent of DeepEP)
             if engine_config.moe_config.use_mori_ep:
                 try:
                     from rtp_llm.models_py.distributed.moriep_wrapper import (
@@ -121,7 +145,6 @@ class BackendManager(object):
                 except Exception as e:
                     logging.error(f"Failed to initialize MoriEP wrapper: {e}")
 
-            # Raise if a requested EP backend failed to initialize
             if engine_config.moe_config.use_deepep_moe and not deepep_init_success:
                 raise RuntimeError("DeepEP was requested but failed to initialize")
             if engine_config.moe_config.use_mori_ep and not moriep_init_success:
@@ -129,20 +152,19 @@ class BackendManager(object):
                     "use_mori_ep is set but MoriEP wrapper failed to initialize"
                 )
 
-        # Optional propose model config
         propose_model_config = ModelFactory.create_propose_model_config(
             engine_config=engine_config,
             model_config=model_config,
             model_args=self.py_env_configs.model_args,
         )
 
-        # Finally create engine using the new API
+        # Engine init + warmup needs both NCCL and model weights.
         self.engine = ModelFactory.from_model_configs(
+            model=model,
             model_config=model_config,
             engine_config=engine_config,
             world_info=world_info,
             vit_config=self.py_env_configs.vit_config,
-            merge_lora=self.py_env_configs.lora_config.merge_lora,
             propose_model_config=propose_model_config,
         )
         logging.info(
