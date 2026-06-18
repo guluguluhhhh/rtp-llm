@@ -1,7 +1,10 @@
 import gc
+import json
 import logging
+import os
 import threading
 import time
+from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
 from pydantic import BaseModel
@@ -14,7 +17,10 @@ from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.distribute.distributed_server import DistributedServer, get_world_info
 from rtp_llm.metrics import kmonitor
 from rtp_llm.model_factory import ModelFactory
-from rtp_llm.models_py.distributed.collective_torch import init_distributed_environment
+from rtp_llm.models_py.distributed.collective_torch import (
+    destroy_distributed_environment,
+    init_distributed_environment,
+)
 from rtp_llm.utils.concurrency_controller import get_global_controller
 from rtp_llm.utils.fuser import _nfs_manager
 
@@ -40,6 +46,7 @@ class BackendManager(object):
             kmonitor.init()
         self.engine: Optional[BaseEngine] = None
         self._shutdown_requested = threading.Event()
+        self._nccl_init_args = None
 
     def start(self):
         """Initialize backend server without entering service loop"""
@@ -70,6 +77,12 @@ class BackendManager(object):
 
             nccl_thread = threading.Thread(target=_init_nccl, daemon=True)
             nccl_thread.start()
+            self._nccl_init_args = {
+                "parallelism_config": engine_config.parallelism_config,
+                "nccl_comm_config": self._distributed_server.get_nccl_comm_config(),
+                "default_port": self._distributed_server.get_nccl_init_port(),
+                "timeout": self.py_env_configs.distribute_config.dist_comm_timeout,
+            }
 
         # These steps don't depend on NCCL — run while NCCL initializes.
         world_info = get_world_info(
@@ -173,16 +186,96 @@ class BackendManager(object):
         )
 
     def serve_forever(self):
-        """Enter service loop to keep the process alive until shutdown is requested"""
-        # freeze all current tracked objects to reduce gc cost
         gc.collect()
         gc.freeze()
+        self._start_ckpt_watchdog()
         logging.info("BackendManager entering serve_forever loop")
         while not self._shutdown_requested.is_set():
-            time.sleep(0.1)  # Check shutdown flag more frequently
+            time.sleep(0.1)
         logging.info("Shutdown requested, stopping BackendManager...")
         self.stop()
         logging.info("BackendManager stopped successfully")
+
+    def _start_ckpt_watchdog(self):
+        rank = self.py_env_configs.parallelism_config.world_rank
+        cmd_path = Path(f"/tmp/rtp_llm_ckpt_cmd_rank{rank}")
+        ack_path = Path(f"/tmp/rtp_llm_ckpt_ack_rank{rank}")
+        cmd_path.unlink(missing_ok=True)
+        ack_path.unlink(missing_ok=True)
+
+        def loop():
+            import torch
+
+            while not self._shutdown_requested.is_set():
+                if cmd_path.exists():
+                    try:
+                        cmd = json.loads(cmd_path.read_text())
+                    except Exception:
+                        cmd_path.unlink(missing_ok=True)
+                        continue
+                    action = cmd.get("action", "")
+                    logging.info(f"[ckpt_watchdog] rank{rank} action={action}")
+                    try:
+                        result = self._handle_ckpt_action(action, cmd, rank)
+                        ack_path.write_text(result)
+                    except Exception as e:
+                        logging.exception(f"[ckpt_watchdog] action={action} failed")
+                        ack_path.write_text(f"ERR:{type(e).__name__}:{e}")
+                    cmd_path.unlink(missing_ok=True)
+                time.sleep(0.1)
+
+        threading.Thread(target=loop, daemon=True, name="ckpt_watchdog").start()
+        logging.info(f"[ckpt_watchdog] started for rank {rank}")
+
+    def _handle_ckpt_action(self, action, cmd, rank):
+        import torch
+
+        if action == "checkpoint_enter":
+            ft_op = self.engine.rtp_llm_op_.ft_op
+            ft_op.set_checkpoint_requested(True)
+            # 发 dummy 推理请求 kick schedule() 解除 cond_var wait
+            try:
+                import urllib.request
+
+                port = self.py_env_configs.server_config.start_port or 8088
+                body = b'{"model":"x","messages":[{"role":"user","content":"_ckpt_kick"}],"max_tokens":1}'
+                req = urllib.request.Request(
+                    f"http://localhost:{port}/v1/chat/completions",
+                    data=body,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                urllib.request.urlopen(req, timeout=5)
+            except Exception:
+                pass  # kick 不需要成功，只需让 schedule() 返回
+            for _ in range(1200):  # 60s timeout
+                if ft_op.get_checkpoint_ready():
+                    return "OK"
+                time.sleep(0.05)
+            return "ERR:checkpoint_ready_timeout"
+        elif action == "destroy_nccl_safe":
+            destroy_distributed_environment()
+            gc.collect()
+            torch.cuda.empty_cache()
+            time.sleep(3)
+            return "OK"
+        elif action == "reinit_and_resume":
+            if self._nccl_init_args:
+                new_port = cmd.get("new_port") or (
+                    self._nccl_init_args["default_port"] + 1000
+                )
+                init_distributed_environment(
+                    self._nccl_init_args["parallelism_config"],
+                    nccl_comm_config=self._nccl_init_args["nccl_comm_config"],
+                    nccl_init_port=int(new_port),
+                    backend="nccl",
+                    timeout=self._nccl_init_args["timeout"],
+                )
+            ft_op = self.engine.rtp_llm_op_.ft_op
+            ft_op.set_checkpoint_requested(False)
+            return "OK"
+        else:
+            return f"ERR:unknown-action:{action}"
 
     def request_shutdown(self):
         """Request graceful shutdown of the backend manager"""

@@ -28,6 +28,8 @@ public:
     startHttpServer(py::object model_weights_loader, py::object world_info, py::object tokenizer, py::object render);
     void pause();
     void restart();
+    void setCheckpointRequested(bool v);
+    bool getCheckpointReady();
 
 private:
     void             _init(int64_t                                       model_rpc_port,

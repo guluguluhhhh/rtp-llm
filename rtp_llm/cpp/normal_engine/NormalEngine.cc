@@ -434,6 +434,16 @@ NormalEngine::batchEnqueue(const std::vector<std::shared_ptr<GenerateInput>>& in
 
 absl::Status NormalEngine::step() {
     RTP_LLM_PROFILE_SCOPE("engine.normal.step_work");
+    // cuda-checkpoint 安全点：在 step 入口检查，所有 rank 同步进入。
+    // 上一次 step 的 process() 已让所有 rank 对齐，此时无 in-flight NCCL。
+    if (checkpoint_requested_.load(std::memory_order_acquire)) {
+        RTP_LLM_LOG_INFO("CKPT_SAFEPOINT: entering checkpoint barrier");
+        checkpoint_ready_.store(true, std::memory_order_release);
+        while (checkpoint_requested_.load(std::memory_order_acquire)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        checkpoint_ready_.store(false, std::memory_order_release);
+    }
     while (pause_) {
         // wait 50ms if system paused.
         std::this_thread::sleep_for(std::chrono::milliseconds(50));

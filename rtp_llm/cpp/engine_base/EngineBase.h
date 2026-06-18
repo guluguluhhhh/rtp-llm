@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include "absl/status/status.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerBase.h"
@@ -46,6 +47,17 @@ public:
 
     void restart() {
         pause_ = false;
+    }
+
+    // cuda-checkpoint 安全点接口
+    void setCheckpointRequested(bool v) {
+        checkpoint_requested_.store(v, std::memory_order_release);
+    }
+    bool getCheckpointReady() const {
+        return checkpoint_ready_.load(std::memory_order_acquire);
+    }
+    bool getCheckpointRequested() const {
+        return checkpoint_requested_.load(std::memory_order_acquire);
     }
 
     virtual std::shared_ptr<GenerateStream> enqueue(const std::shared_ptr<GenerateInput>& input) = 0;
@@ -97,6 +109,10 @@ protected:
     std::vector<int32_t>           kv_cache_layer_to_group_;
     std::unique_ptr<SchedulerBase> scheduler_ = nullptr;
     bool                           pause_     = false;
+
+    // cuda-checkpoint 安全点支持
+    std::atomic<bool> checkpoint_requested_{false};
+    std::atomic<bool> checkpoint_ready_{false};
 };
 
 }  // namespace rtp_llm

@@ -395,6 +395,28 @@ void RtpLLMOp::restart() {
     engine->restart();
 }
 
+void RtpLLMOp::setCheckpointRequested(bool v) {
+    auto engine = model_rpc_service_->getEngine();
+    RTP_LLM_LOG_INFO("setCheckpointRequested(%d) engine=%p before_val=%d",
+                     (int)v,
+                     (void*)engine.get(),
+                     (int)engine->getCheckpointReady());
+    engine->setCheckpointRequested(v);
+    // 立即读回验证
+    bool readback = engine->getCheckpointRequested();
+    RTP_LLM_LOG_INFO("setCheckpointRequested readback=%d (should be %d)", (int)readback, (int)v);
+}
+
+bool RtpLLMOp::getCheckpointReady() {
+    auto eng = model_rpc_service_->getEngine();
+    RTP_LLM_LOG_INFO("getCheckpointReady engine=%p requested=%d ready=%d",
+                     (void*)eng.get(),
+                     (int)eng->getCheckpointReady(),
+                     (int)eng->getCheckpointReady());
+    auto engine = model_rpc_service_->getEngine();
+    return engine->getCheckpointReady();
+}
+
 void registerRtpLLMOp(const py::module& m) {
     pybind11::class_<RtpLLMOp>(m, "RtpLLMOp")
         .def(pybind11::init<>())
@@ -412,6 +434,10 @@ void registerRtpLLMOp(const py::module& m) {
              py::arg("world_info"),
              py::arg("tokenizer"),
              py::arg("render"))
+        .def("pause", &RtpLLMOp::pause)
+        .def("restart", &RtpLLMOp::restart)
+        .def("set_checkpoint_requested", &RtpLLMOp::setCheckpointRequested)
+        .def("get_checkpoint_ready", &RtpLLMOp::getCheckpointReady)
         .def("stop", &RtpLLMOp::stop);
 }
 
