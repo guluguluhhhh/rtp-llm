@@ -315,10 +315,11 @@ def forward_layers(
         h = prepare_hidden_fn(input_ids=input_ids, meta=attn_metadata)
     if _rt_on:
         _rt.record("decode_embed_hc_expanded", h)
+    begin_decode = getattr(v4, "begin_decode", None)
+    if begin_decode is not None:
+        begin_decode(attn_metadata)
     begin_aux_capture = getattr(v4, "begin_aux_hidden_capture", None)
-    aux_hidden_capture = (
-        begin_aux_capture() if begin_aux_capture is not None else None
-    )
+    aux_hidden_capture = begin_aux_capture() if begin_aux_capture is not None else None
     for layer_idx, layer in enumerate(v4.layers):
         h = layer.forward_decode(h, attn_metadata, input_ids, kv_cache=kv_cache)
         if aux_hidden_capture is not None:
@@ -433,9 +434,7 @@ def forward_decode(
         if meta is None:
             # Empty batch (B == 0) — short-circuit with zero-row hidden.
             outputs = PyModelOutputs(
-                torch.zeros(
-                    (0, v4_args.dim), dtype=torch.bfloat16, device=param_dev
-                )
+                torch.zeros((0, v4_args.dim), dtype=torch.bfloat16, device=param_dev)
             )
             capture_ids = getattr(v4, "capture_aux_hidden_layer_ids", ())
             if capture_ids:

@@ -7,6 +7,7 @@ all experts on one device). Used to validate end-to-end correctness with
 mock per-layer KV cache before wiring into RTP-LLM's GptModelBase.
 """
 
+import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence
 
@@ -192,6 +193,17 @@ class V4Transformer(nn.Module):
                 for i in range(args.n_layers)
             ]
         )
+        self._mega_csa_runtime = None
+        if os.environ.get("DSV4_MEGA_CSA", "0") not in ("0", "", "false", "False"):
+            if not args.fp8_kv_cache or args.tp_size != 1:
+                raise RuntimeError("DSV4_MEGA_CSA requires FP8 KV cache and TP1")
+            from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_csa_runtime import (
+                MegaCSARuntime,
+            )
+
+            self._mega_csa_runtime = MegaCSARuntime()
+            for layer_id, layer in enumerate(self.layers):
+                layer.enable_mega_csa(self._mega_csa_runtime, mw.weights[layer_id])
         self.norm = RMSNorm(gw[W.final_ln_gamma], args.norm_eps)
 
         # MTP draft is a separate model (``DeepSeekV4MtpModel``) that
@@ -446,6 +458,11 @@ class V4Transformer(nn.Module):
         """Reduce the hc axis for ``[B, S, hc, d]`` or flat ``[T, hc, d]``."""
         return self.head_hc.head(x)
 
+    def begin_decode(self, attn_metadata: object) -> None:
+        """Advance model-wide decode state before entering the layer loop."""
+        if self._mega_csa_runtime is not None:
+            self._mega_csa_runtime.begin_decode(attn_metadata)
+
     @torch.inference_mode()
     def forward_decode(
         self,
@@ -466,6 +483,7 @@ class V4Transformer(nn.Module):
             input_ids_2d = input_ids
         h = self.embed(input_ids_2d)  # [B, q_len, dim]
         h = h.unsqueeze(2).repeat(1, 1, self.hc_mult, 1)  # [B, q_len, hc, dim]
+        self.begin_decode(attn_metadata)
         for layer in self.layers:
             h = layer.forward_decode(h, attn_metadata, input_ids_2d, kv_cache=kv_cache)
         h = self._hc_head_reduce(h)  # [B, q_len, dim]
