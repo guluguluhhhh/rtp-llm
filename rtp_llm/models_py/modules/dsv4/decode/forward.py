@@ -318,6 +318,9 @@ def forward_layers(
         _rt.record("decode_embed_hc_expanded", h)
     capture_ids = frozenset(v4.capture_aux_hidden_layer_ids)
     layer_forward_range = _profiler.make_layer_forward_range()
+    begin_decode = getattr(v4, "begin_decode", None)
+    if begin_decode is not None:
+        begin_decode(attn_metadata)
     for layer_idx, layer in enumerate(v4.layers):
         with layer_forward_range(layer_idx):
             h = layer.forward_decode(h, attn_metadata, input_ids, kv_cache=kv_cache)
@@ -437,9 +440,17 @@ def forward_decode(
         )
         if meta is None:
             # Empty batch (B == 0) — short-circuit with zero-row hidden.
-            return PyModelOutputs(
+            outputs = PyModelOutputs(
                 torch.zeros((0, v4_args.dim), dtype=torch.bfloat16, device=param_dev)
             )
+            capture_ids = getattr(v4, "capture_aux_hidden_layer_ids", ())
+            if capture_ids:
+                outputs.aux_hidden_states = torch.zeros(
+                    (0, len(capture_ids), v4_args.dim),
+                    dtype=torch.bfloat16,
+                    device=param_dev,
+                )
+            return outputs
 
     B = meta.batch_size
     q_len = meta.q_len_per_req
