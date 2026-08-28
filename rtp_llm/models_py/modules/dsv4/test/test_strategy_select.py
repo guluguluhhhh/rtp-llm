@@ -208,6 +208,12 @@ class StrategySelectTest(unittest.TestCase):
                 select_strategy(_cfg(ep_size=2), forced="mega_se", strict=True)
         self.assertIn("Forced MoE strategy 'mega_se'", str(cm.exception))
 
+    def test_disabling_mega_se_does_not_restore_routed_only_path(self):
+        with _env(DSV4_USE_MEGA_MOE_SE="0"):
+            with self.assertRaises(RuntimeError) as cm:
+                select_strategy(_cfg(ep_size=2))
+        self.assertIn("MegaMoE-SE", str(cm.exception))
+
     def test_legacy_use_grouped_fp4_1_translates_to_grouped_nonstrict(self):
         with _env(DSV4_USE_GROUPED_FP4="1"):
             self.assertEqual(_resolve_forced(None), ("grouped_fp4", False))

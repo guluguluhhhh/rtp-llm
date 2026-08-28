@@ -192,6 +192,8 @@ def _mega_moe_se_unavailable_reason() -> str | None:
 
     if os.environ.get("DSV4_USE_MEGA_MOE", "1") == "0":
         return "DSV4_USE_MEGA_MOE=0 disables Mega MoE"
+    if not mega_moe_se_requested():
+        return f"{_USE_MEGA_MOE_SE_ENV}=0 disables MegaMoE-SE"
     base = _mega_moe_unavailable_reason()
     if base is not None:
         return base

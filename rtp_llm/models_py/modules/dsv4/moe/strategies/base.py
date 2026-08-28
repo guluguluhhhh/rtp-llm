@@ -12,16 +12,16 @@ Strategies (priority high→low for ``forced=None``):
 
     ep_size  env / kernel                 → strategy
     --------------------------------------------------------
-    >1       DSV4_USE_MEGA_MOE_SE!=0       MegaMoEStrategySE (strict; default)
-    >1       DSV4_USE_MEGA_MOE_SE=0        MegaMoEStrategy
-    >1       mega unavailable/disabled     RuntimeError
+    >1       MegaMoE-SE available         MegaMoEStrategySE (default)
+    >1       MegaMoE-SE unavailable       RuntimeError
     1        grouped FP4 kernel available  GroupedFP4Strategy
     1        grouped unavailable           LocalLoopStrategy
 
 A model can override the auto-pick via:
   - ``MoE(strategy="mega_se"|"grouped_fp4"|"local_loop"|"deepep")`` ctor kwarg
   - ``DSV4_MOE_STRATEGY`` env var (overrides ctor kwarg)
-  - ``DSV4_USE_MEGA_MOE_SE=0`` to disable the default fused shared expert
+  - ``DSV4_USE_MEGA_MOE_SE=0`` to disable MegaMoE-SE (EP>1 then fails; there
+    is no routed-only Mega fallback)
   - legacy ``DSV4_USE_MEGA_MOE=0`` / ``DSV4_USE_GROUPED_FP4=0|1`` toggles
     (translated to forced=... internally; conflicting toggles → RuntimeError)
 
