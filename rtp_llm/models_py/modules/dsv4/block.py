@@ -363,7 +363,10 @@ class Block(nn.Module):
         # Mega decode replaces the ordinary HC/norm/router/pack sequence with
         # the extension front; non-Mega strategies keep the generic path.
         residual = x
-        if self.ffn.mega_front_enabled:
+        # ``mega_front_enabled`` is a concrete bool on the production MoE
+        # module. Requiring identity with True keeps lightweight test/draft
+        # stubs from accidentally entering the CUDA-only front path.
+        if getattr(self.ffn, "mega_front_enabled", False) is True:
             ffn_out, x_pre, post, comb = self.ffn.forward_mega_front(x, input_ids)
         else:
             x_pre, post, comb = self.ffn_hc.pre(
