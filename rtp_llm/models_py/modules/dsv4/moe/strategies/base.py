@@ -258,8 +258,8 @@ def select_strategy(
         if se_requested and fused_requested:
             raise RuntimeError(
                 "DSV4_USE_MEGA_MOE_SE (defaults to 1) conflicts with "
-                "DSV4_USE_MEGA_MOE_FUSED=1; set DSV4_USE_MEGA_MOE_SE=0 "
-                "to select the older fused variant."
+                "DSV4_USE_MEGA_MOE_FUSED=1; unset the legacy fused toggle "
+                "to use the default MegaMoE-SE path."
             )
         if se_requested:
             if forced not in (None, "mega", "mega_se"):
