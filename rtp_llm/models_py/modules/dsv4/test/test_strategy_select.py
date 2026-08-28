@@ -73,6 +73,7 @@ class StrategySelectTest(unittest.TestCase):
         for k in (
             "DSV4_MOE_STRATEGY",
             "DSV4_USE_MEGA_MOE",
+            "DSV4_USE_MEGA_MOE_SE",
             "DSV4_USE_MEGA_MOE_FUSED",
             "DSV4_USE_GROUPED_FP4",
         ):
@@ -131,11 +132,12 @@ class StrategySelectTest(unittest.TestCase):
             self.assertIs(select_strategy(_cfg(ep_size=4)), MegaMoEStrategySE)
 
     def test_ep_gt1_no_mega_raises(self):
-        with mock.patch.object(MegaMoEStrategySE, "can_handle", return_value=False):
+        with _env(DSV4_USE_MEGA_MOE_SE="1"), mock.patch.object(
+            MegaMoEStrategySE, "can_handle", return_value=False
+        ):
             with self.assertRaises(RuntimeError) as cm:
                 select_strategy(_cfg(ep_size=4))
-        self.assertIn("requires MegaMoEStrategySE", str(cm.exception))
-        self.assertIn("fallback to DeepEP/LocalLoop is disabled", str(cm.exception))
+        self.assertIn("Forced MoE strategy 'mega_se'", str(cm.exception))
 
     # --- forced override ---------------------------------------------------
 
@@ -154,7 +156,9 @@ class StrategySelectTest(unittest.TestCase):
         self.assertIn("cannot handle", str(cm.exception))
 
     def test_forced_ep_gt1_non_mega_raises_even_if_capable(self):
-        with mock.patch.object(DeepEPStrategy, "can_handle", return_value=True):
+        with _env(DSV4_USE_MEGA_MOE_SE="0"), mock.patch.object(
+            DeepEPStrategy, "can_handle", return_value=True
+        ):
             with self.assertRaises(RuntimeError) as cm:
                 select_strategy(_cfg(ep_size=4), forced="deepep")
         self.assertIn("requires a Mega strategy", str(cm.exception))
@@ -227,7 +231,7 @@ class StrategySelectTest(unittest.TestCase):
             self.assertEqual(_resolve_forced(None), (None, False))
 
     def test_legacy_negation_ep_gt1_raises(self):
-        with _env(DSV4_USE_MEGA_MOE="0"):
+        with _env(DSV4_USE_MEGA_MOE="0", DSV4_USE_MEGA_MOE_SE="0"):
             with self.assertRaises(RuntimeError) as cm:
                 select_strategy(_cfg(ep_size=4))
         self.assertIn("DSV4_USE_MEGA_MOE=0 disables Mega MoE", str(cm.exception))
