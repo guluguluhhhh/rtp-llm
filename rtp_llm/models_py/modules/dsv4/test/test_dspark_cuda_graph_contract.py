@@ -1,6 +1,6 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 
@@ -110,6 +110,69 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
         self.assertEqual(metadata.sched_meta_cache, {})
         self.assertTrue(metadata.support_cuda_graph())
         metadata.prepare_cuda_graph(None)
+
+    def test_mega_front_replaces_dspark_ffn_pre_and_gate_pack(self) -> None:
+        model = _dspark_harness(gamma=3)
+        batch_size = 2
+        dim = int(model._v4_args.dim)
+        query_ids = torch.arange(batch_size * 3).view(batch_size, 3)
+        hidden = torch.zeros((batch_size, 3, 4, dim), dtype=torch.bfloat16)
+        ffn_output = torch.ones((batch_size, 3, dim), dtype=torch.bfloat16)
+        post = torch.empty((batch_size, 3, 4, 1))
+        comb = torch.empty((batch_size, 3, 4, 4))
+
+        ffn = SimpleNamespace(
+            mega_front_enabled=True,
+            forward_mega_front=Mock(
+                return_value=(ffn_output, torch.empty_like(ffn_output), post, comb)
+            ),
+        )
+        layer = SimpleNamespace(
+            attn_hc=SimpleNamespace(
+                pre=Mock(
+                    return_value=(
+                        torch.empty((batch_size, 3, dim)),
+                        post,
+                        comb,
+                    )
+                ),
+                post=Mock(return_value=hidden),
+            ),
+            attn_norm=Mock(side_effect=lambda value: value),
+            ffn_hc=SimpleNamespace(
+                pre=Mock(side_effect=AssertionError("old FFN pre path used")),
+                post=Mock(return_value=hidden),
+            ),
+            ffn_norm=Mock(side_effect=AssertionError("old FFN norm path used")),
+            ffn=ffn,
+        )
+        model.v4 = SimpleNamespace(
+            embed=Mock(return_value=torch.zeros((batch_size, 3, dim))),
+            hc_mult=4,
+            layers=[layer],
+        )
+
+        forward_attention = Mock(return_value=ffn_output)
+        object.__setattr__(model, "_forward_dspark_attention", forward_attention)
+        result = model._forward_layers(
+            query_ids=query_ids,
+            query_positions=torch.zeros((batch_size, 3), dtype=torch.long),
+            main_x=torch.empty((0, dim)),
+            context_req_ids=torch.empty((0,), dtype=torch.int32),
+            context_positions=torch.empty((0,), dtype=torch.int32),
+            prefix_lengths=torch.zeros((batch_size,), dtype=torch.int32),
+            active_requests=torch.ones((batch_size,), dtype=torch.bool),
+            block_table=torch.ones((batch_size, 1), dtype=torch.int32),
+            tokens_per_block=256,
+            graph_metadata=SimpleNamespace(),
+        )
+
+        self.assertIs(result, hidden)
+        ffn.forward_mega_front.assert_called_once()
+        self.assertIs(ffn.forward_mega_front.call_args.args[0], hidden)
+        self.assertIs(ffn.forward_mega_front.call_args.args[1], query_ids)
+        layer.ffn_hc.pre.assert_not_called()
+        layer.ffn_norm.assert_not_called()
 
     def test_context_write_uses_request_ids_positions_and_committed_ends(self) -> None:
         """The DSpARK call site must not reconstruct positions from a QSL."""

@@ -637,11 +637,16 @@ class DeepSeekV4DSparkModel(DeepSeekV4Model):
             hidden = layer.attn_hc.post(attention_output, residual, post, comb)
 
             residual = hidden
-            x_pre, post, comb = layer.ffn_hc.pre(hidden)
-            x_pre = layer.ffn_norm(
-                x_pre.reshape(batch_size * gamma, int(self._v4_args.dim))
-            ).view(batch_size, gamma, int(self._v4_args.dim))
-            ffn_output = layer.ffn(x_pre, query_ids)
+            if layer.ffn.mega_front_enabled:
+                ffn_output, _, post, comb = layer.ffn.forward_mega_front(
+                    hidden, query_ids
+                )
+            else:
+                x_pre, post, comb = layer.ffn_hc.pre(hidden)
+                x_pre = layer.ffn_norm(
+                    x_pre.reshape(batch_size * gamma, int(self._v4_args.dim))
+                ).view(batch_size, gamma, int(self._v4_args.dim))
+                ffn_output = layer.ffn(x_pre, query_ids)
             hidden = layer.ffn_hc.post(ffn_output, residual, post, comb)
 
             # The custom non-causal attention path bypasses the ordinary V4

@@ -33,6 +33,7 @@ from rtp_llm.models_py.modules.dsv4.chunk_env import (
 )
 
 from .gate import Gate
+from .mega_front import MegaMoeFrontAdapter
 from .shared_expert import (
     W13SharedExpert,
     combine_routed_and_shared,
@@ -270,6 +271,22 @@ class MoE(nn.Module):
         self._strategy._gate_pack_warmup_enabled = self._gate_pack_static
         self._strategy._gate_pack_route_scale = float(self.gate.route_scale)
         self._strategy.setup_weights(layer_weights)
+        self._mega_front: MegaMoeFrontAdapter | None = None
+
+    def enable_mega_front(self, ffn_hc, ffn_norm) -> None:
+        """Attach the extension front to the default Mega-SE decode path."""
+        if getattr(self._strategy, "name", "") != "mega_se":
+            return
+        self._mega_front = MegaMoeFrontAdapter(self, ffn_hc, ffn_norm)
+
+    @property
+    def mega_front_enabled(self) -> bool:
+        return self._mega_front is not None
+
+    def forward_mega_front(self, residual: torch.Tensor, input_ids: torch.Tensor):
+        if self._mega_front is None:
+            raise RuntimeError("DSV4 MegaMoE front is not enabled")
+        return self._mega_front.forward(residual, input_ids)
 
     def _should_chunk(self, tokens: int) -> bool:
         max_tokens = int(self.max_tokens_per_rank)

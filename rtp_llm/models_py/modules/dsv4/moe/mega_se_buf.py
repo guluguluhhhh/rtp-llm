@@ -19,15 +19,8 @@ from .mega_buf import _mega_moe_unavailable_reason
 _MEGA_SE_BUF_CACHE: dict = {}
 _MEGA_SE_OUTPUT_CACHE: dict = {}
 
-_USE_MEGA_MOE_SE_ENV = "DSV4_USE_MEGA_MOE_SE"
 _NUM_SHARED_EXPERTS = 1
 _MMA_TYPE = "fp8xfp4"
-
-
-def mega_moe_se_requested() -> bool:
-    """Return whether the operator explicitly opted into fused SE execution."""
-
-    return os.environ.get(_USE_MEGA_MOE_SE_ENV, "0") == "1"
 
 
 def estimate_mega_moe_se_symm_buffer_bytes(
@@ -192,11 +185,11 @@ def _signature_has(callable_obj, required: tuple[str, ...]) -> str | None:
 def _mega_moe_se_unavailable_reason() -> str | None:
     """Return ``None`` only when the installed Mega API supports fused SE."""
 
+    if os.environ.get("DSV4_USE_MEGA_MOE", "1") == "0":
+        return "DSV4_USE_MEGA_MOE=0 disables Mega MoE"
     base = _mega_moe_unavailable_reason()
     if base is not None:
         return base
-    if os.environ.get("DSV4_USE_MEGA_MOE", "1") == "0":
-        return "DSV4_USE_MEGA_MOE=0 disables the Mega MoE family"
     try:
         import deep_gemm
 
@@ -227,13 +220,7 @@ def _mega_moe_se_available() -> bool:
     return _mega_moe_se_unavailable_reason() is None
 
 
-def _mega_moe_se_enabled() -> bool:
-    return mega_moe_se_requested() and _mega_moe_se_available()
-
-
 def _mega_moe_se_disabled_or_unavailable_reason() -> str:
-    if not mega_moe_se_requested():
-        return f"{_USE_MEGA_MOE_SE_ENV} is not set to 1"
     return (
         _mega_moe_se_unavailable_reason()
         or "unknown Mega MoE fused-SE availability failure"
