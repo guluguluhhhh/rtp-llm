@@ -19,11 +19,14 @@ Strategies (priority high→low for ``forced=None``):
     1        grouped unavailable           LocalLoopStrategy
 
 A model can override the auto-pick via:
-  - ``MoE(strategy="mega"|"grouped_fp4"|"local_loop"|"deepep")`` ctor kwarg
+  - ``MoE(strategy="mega_se"|"grouped_fp4"|"local_loop"|"deepep")`` ctor kwarg
   - ``DSV4_MOE_STRATEGY`` env var (overrides ctor kwarg)
   - ``DSV4_USE_MEGA_MOE_SE=0`` to disable the default fused shared expert
   - legacy ``DSV4_USE_MEGA_MOE=0`` / ``DSV4_USE_GROUPED_FP4=0|1`` toggles
     (translated to forced=... internally; conflicting toggles → RuntimeError)
+
+``mega`` remains accepted as a compatibility alias for ``mega_se``. The old
+routed-only Mega strategy is an implementation base, not a selectable path.
 """
 
 from __future__ import annotations
@@ -89,8 +92,8 @@ class RoutedExpertsStrategy(nn.Module):
     define ``setup_weights`` + ``can_handle``.
     """
 
-    # Registered names currently include mega, mega_se, mega_fused,
-    # grouped_fp4, local_loop, and deepep.
+    # Registered names currently include mega_se, mega_fused, grouped_fp4,
+    # local_loop, and deepep.
     name: ClassVar[str]
 
     # True when ``forward`` already returns ``routed + shared`` (the strategy
@@ -171,14 +174,19 @@ def register_strategy(cls: Type[RoutedExpertsStrategy]) -> Type[RoutedExpertsStr
     return cls
 
 
+def _canonical_strategy_name(name: Optional[str]) -> Optional[str]:
+    # Keep existing launch configurations working while making every generic
+    # Mega selection resolve to the shared-expert implementation.
+    return "mega_se" if name == "mega" else name
+
+
 def _resolve_forced(strategy_arg: Optional[str]) -> tuple[Optional[str], bool]:
     """Apply env-var overrides on top of constructor kwarg.
 
     Returns ``(forced_name, strict)``:
       - ``forced_name``: the strategy name to try, or ``None`` (auto-pick)
       - ``strict``: ``True`` → fail loudly if can_handle is False (explicit
-        opt-in via ``DSV4_MOE_STRATEGY=...``, ``DSV4_USE_MEGA_MOE_SE=1``, or
-        ctor kwarg);
+        opt-in via ``DSV4_MOE_STRATEGY=...`` or ctor kwarg);
         ``False`` → silently fall through to auto-pick if can_handle is False
         (legacy ``DSV4_USE_MEGA_MOE=1`` / ``DSV4_USE_GROUPED_FP4=1`` toggles —
         historically a "use if applicable" hint, NOT a hard force; e.g.
@@ -187,50 +195,37 @@ def _resolve_forced(strategy_arg: Optional[str]) -> tuple[Optional[str], bool]:
 
     Precedence (highest first):
       1. ``DSV4_MOE_STRATEGY`` env var (if not "auto") — strict
-      2. compatibility toggles (Mega-SE strict; historical toggles non-strict)
+      2. compatibility toggles (historical toggles are non-strict)
       3. ``strategy_arg`` ctor kwarg — strict
 
     Raises ``RuntimeError`` on conflicting toggles.
     """
     env = os.environ.get("DSV4_MOE_STRATEGY", "").strip()
     if env and env != "auto":
-        return env, True
+        return _canonical_strategy_name(env), True
 
     use_mega = os.environ.get("DSV4_USE_MEGA_MOE")
-    use_mega_se = os.environ.get("DSV4_USE_MEGA_MOE_SE")
     use_grouped = os.environ.get("DSV4_USE_GROUPED_FP4")
     legacy_pos: list[str] = []
-    # Mega-SE is an explicit, strict opt-in. A generic Mega=1 hint is
-    # compatible with it and is subsumed by the more specific selection.
-    if use_mega_se == "1":
+    if use_mega == "1":
         legacy_pos.append("mega_se")
-    elif use_mega == "1":
-        legacy_pos.append("mega")
     if use_grouped == "1":
         legacy_pos.append("grouped_fp4")
 
     if len(legacy_pos) > 1:
         raise RuntimeError(
             f"Conflicting legacy MoE toggles (multiple positive): {legacy_pos}. "
-            "Set at most one of DSV4_USE_MEGA_MOE_SE / DSV4_USE_MEGA_MOE / "
-            "DSV4_USE_GROUPED_FP4 to 1, "
+            "Set at most one of DSV4_USE_MEGA_MOE / DSV4_USE_GROUPED_FP4 to 1, "
             "or use DSV4_MOE_STRATEGY=<name>."
         )
-    compatible_ctor = legacy_pos == ["mega_se"] and strategy_arg in ("mega", "mega_se")
-    if (
-        legacy_pos
-        and strategy_arg
-        and strategy_arg not in legacy_pos
-        and not compatible_ctor
-    ):
+    strategy_arg = _canonical_strategy_name(strategy_arg)
+    if legacy_pos and strategy_arg and strategy_arg not in legacy_pos:
         raise RuntimeError(
             f"Conflicting MoE strategy: ctor strategy={strategy_arg!r} but legacy "
             f"toggle forces {legacy_pos[0]!r}. Pick one source of truth."
         )
     if legacy_pos:
-        # Unlike historical best-effort toggles, the SE switch exists to prove
-        # that the fused path is active and therefore must fail if unavailable.
-        return legacy_pos[0], legacy_pos[0] == "mega_se"
+        return legacy_pos[0], False
     return strategy_arg, strategy_arg is not None  # ctor kwarg → strict
 
 
@@ -246,6 +241,7 @@ def select_strategy(
     ``DSV4_MOE_STRATEGY``), fail loudly if ``forced`` can't handle cfg.
     When False (legacy env toggle), fall through silently to auto-pick.
     """
+    forced = _canonical_strategy_name(forced)
     explicit_env = os.environ.get("DSV4_MOE_STRATEGY", "").strip()
     explicit_env = bool(explicit_env and explicit_env != "auto")
 
@@ -275,10 +271,10 @@ def select_strategy(
 
     # ``DSV4_USE_MEGA_MOE_FUSED=1`` opts the EP routed path into the fused
     # Mega kernel. It is a Mega variant, so it only kicks in where the
-    # non-fused Mega would (ep_size > 1) and replaces an unspecified/"mega"
+    # default Mega-SE would (ep_size > 1) and replaces an unspecified/Mega-SE
     # selection. Strict so an unavailable fused kernel fails loudly rather
     # than silently downgrading to non-fused (which would invalidate tests).
-    if cfg.ep_size > 1 and forced in (None, "mega") and not explicit_env:
+    if cfg.ep_size > 1 and forced in (None, "mega_se") and not explicit_env:
         from rtp_llm.models_py.modules.dsv4.moe.mega_fused_buf import (
             mega_moe_fused_requested,
         )
@@ -291,12 +287,11 @@ def select_strategy(
             if cls.name == forced:
                 if cls.can_handle(cfg):
                     if cfg.ep_size > 1 and cls.name not in (
-                        "mega",
                         "mega_fused",
                         "mega_se",
                     ):
                         raise RuntimeError(
-                            "DSV4 EP MoE requires MegaMoEStrategy. "
+                            "DSV4 EP MoE requires a Mega strategy. "
                             f"Requested strategy {forced!r} would bypass Mega "
                             f"(layer_id={cfg.layer_id}, ep_size={cfg.ep_size})."
                         )
@@ -314,22 +309,22 @@ def select_strategy(
             raise RuntimeError(f"Unknown MoE strategy {forced!r}. Available: {names}")
 
     if cfg.ep_size > 1:
-        mega_cls = next((c for c in _STRATEGY_PRIORITY if c.name == "mega"), None)
+        mega_cls = next((c for c in _STRATEGY_PRIORITY if c.name == "mega_se"), None)
         if mega_cls is None:
             raise RuntimeError(
-                "DSV4 EP MoE requires MegaMoEStrategy, but it is not registered."
+                "DSV4 EP MoE requires MegaMoEStrategySE, but it is not registered."
             )
         if mega_cls.can_handle(cfg):
             return mega_cls
-        from rtp_llm.models_py.modules.dsv4.moe.mega_buf import (
-            _mega_moe_disabled_or_unavailable_reason,
+        from rtp_llm.models_py.modules.dsv4.moe.mega_se_buf import (
+            _mega_moe_se_disabled_or_unavailable_reason,
         )
 
         raise RuntimeError(
-            "DSV4 EP MoE requires MegaMoEStrategy by default; fallback to "
+            "DSV4 EP MoE requires MegaMoEStrategySE by default; fallback to "
             "DeepEP/LocalLoop is disabled. "
             f"layer_id={cfg.layer_id}, ep_size={cfg.ep_size}. "
-            f"Reason: {_mega_moe_disabled_or_unavailable_reason()}."
+            f"Reason: {_mega_moe_se_disabled_or_unavailable_reason()}."
         )
 
     for cls in _STRATEGY_PRIORITY:

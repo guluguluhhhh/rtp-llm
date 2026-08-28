@@ -198,6 +198,9 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
     def test_commit_write_uses_request_ids_positions_and_committed_ends(self) -> None:
         """The DSpARK commit call must not reconstruct positions from a QSL."""
 
+        class StopAfterContextWrite(Exception):
+            pass
+
         class FakeAttention:
             compress_ratio = 0
             rope_head_dim = 2

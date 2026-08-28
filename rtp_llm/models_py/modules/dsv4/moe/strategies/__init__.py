@@ -8,7 +8,7 @@ kernel availability).
 Importing this package populates the strategy registry (each
 ``@register_strategy``-decorated class registers itself on import). Order
 of import below = priority for ``select_strategy(forced=None)`` auto-pick.
-EP>1 is special-cased to require Mega and fail fast when it is unavailable.
+EP>1 is special-cased to require Mega-SE and fail fast when it is unavailable.
 
 NOTE: ``# isort: skip_file`` above is REQUIRED. The import order here is the
 priority order, and it is load-bearing: ``deepep`` transitively imports
@@ -27,8 +27,8 @@ from .base import (
 # Side-effect import — each module's ``@register_strategy`` decorator pushes
 # the class into the priority list as the import lands. Order here = priority
 # (high→low):
-from .mega import MegaMoEStrategy  # noqa: F401  ep_size>1 + SM100 + dist
-from .mega_se import MegaMoEStrategySE  # noqa: F401  explicit fused-SE opt-in
+from .mega import MegaMoEStrategy  # noqa: F401  internal implementation base
+from .mega_se import MegaMoEStrategySE  # noqa: F401  default ep_size>1 path
 from .mega_fused import MegaMoEFusedStrategy  # noqa: F401  ep_size>1 + fused opt-in
 from .grouped_fp4 import (  # noqa: F401  ep_size==1 + kernel
     GroupedFP4Strategy,

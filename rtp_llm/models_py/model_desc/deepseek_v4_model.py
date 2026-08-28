@@ -819,10 +819,32 @@ class DeepSeekV4Model(GptModelBase):
             try:
                 import torch.distributed as _dist
 
-                _strategy = self.v4.layers[0].ffn._strategy
-                if getattr(_strategy, "name", "") in ("mega", "mega_se"):
+                _ffn = self.v4.layers[0].ffn
+                if _ffn.mega_front_enabled:
                     if _dist.is_available() and _dist.is_initialized():
                         _dist.barrier()
+                    _cfg = _ffn._strategy.cfg
+                    _hidden_moe = _torch.zeros(
+                        (1, 1, int(self.v4.hc_mult), int(_cfg.dim)),
+                        dtype=_torch.bfloat16,
+                        device=device_str,
+                    )
+                    _ids_moe = _torch.zeros(
+                        (1, 1),
+                        dtype=_torch.int64,
+                        device=device_str,
+                    )
+                    _ffn.forward_mega_front(_hidden_moe, _ids_moe)
+                    _torch.cuda.synchronize()
+                    if _dist.is_available() and _dist.is_initialized():
+                        _dist.barrier()
+                    logging.info("[DeepSeekV4Model] MegaMoE-front prewarm done")
+                elif getattr(_ffn._strategy, "name", "") in ("mega", "mega_se"):
+                    # Retain the legacy routed-only warmup when the front is
+                    # explicitly disabled for compatibility testing.
+                    if _dist.is_available() and _dist.is_initialized():
+                        _dist.barrier()
+                    _strategy = _ffn._strategy
                     _cfg = _strategy.cfg
                     _x_moe = _torch.zeros(
                         (1, int(_cfg.dim)), dtype=_torch.bfloat16, device=device_str
@@ -843,8 +865,7 @@ class DeepSeekV4Model(GptModelBase):
                         )
                         % (_end - _start)
                     ) + _start
-                    _idx_moe = _idx_vals.unsqueeze(0).contiguous()
-                    _strategy(_x_moe, _w_moe, _idx_moe)
+                    _strategy(_x_moe, _w_moe, _idx_vals.unsqueeze(0).contiguous())
                     _torch.cuda.synchronize()
                     if _dist.is_available() and _dist.is_initialized():
                         _dist.barrier()

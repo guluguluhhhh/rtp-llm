@@ -20,7 +20,7 @@ from ...quant_layouts import FP4_BLOCK, prepare_fp4_weight_scale_for_deepgemm
 from ..mega_se_buf import (
     _get_or_create_mega_se_buf,
     _get_or_create_mega_se_output,
-    _mega_moe_se_enabled,
+    _mega_moe_se_available,
 )
 from ..mega_se_input_packer import get_mega_moe_se_input_packer
 from ..mega_se_jit_warmup import (
@@ -84,7 +84,7 @@ class MegaMoEStrategySE(MegaMoEStrategy):
 
     @classmethod
     def can_handle(cls, cfg: MoeCfg) -> bool:
-        return cfg.ep_size > 1 and _mega_moe_se_enabled()
+        return cfg.ep_size > 1 and _mega_moe_se_available()
 
     def setup_weights(self, layer_weights: Dict) -> None:
         import deep_gemm
@@ -442,6 +442,13 @@ class MegaMoEStrategySE(MegaMoEStrategy):
         self._input_packer.pack(x, weights, indices, self._mega_buf, tokens, block_m)
         y = self._mega_y[:tokens]
         self._launch(y, tokens, x.device)
+        return y
+
+    def forward_prepacked(self, tokens: int, device: torch.device) -> torch.Tensor:
+        """Launch MegaMoE-SE after the extension populated its input buffers."""
+        self._validate_capacity(tokens)
+        y = self._mega_y[:tokens]
+        self._launch(y, tokens, device)
         return y
 
     def forward_with_gate_pack(self, x, gate, input_ids):

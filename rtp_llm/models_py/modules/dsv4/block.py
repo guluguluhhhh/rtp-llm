@@ -159,6 +159,7 @@ class Block(nn.Module):
             layer_id=layer_id,
             name="ffn",
         )
+        self.ffn.enable_mega_front(self.ffn_hc, self.ffn_norm)
         self._prefill_fast_hc_impls_cached = self._resolve_prefill_fast_hc_impls()
         self._mega_csa_adapter = None
         self._mega_hca_adapter = None
@@ -189,7 +190,6 @@ class Block(nn.Module):
         if os.environ.get("DSV4_CP_SYNC_AFTER_ATTN_ONCE", "1") == "0":
             return
         if getattr(getattr(self.ffn, "_strategy", None), "name", "") not in (
-            "mega",
             "mega_fused",
             "mega_se",
         ):
@@ -360,17 +360,25 @@ class Block(nn.Module):
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_attn_residual", x)
 
-        # FFN path — MoE has no per-step state, reuse existing forward
+        # Mega decode replaces the ordinary HC/norm/router/pack sequence with
+        # the extension front; non-Mega strategies keep the generic path.
         residual = x
-        x_pre, post, comb = self.ffn_hc.pre(
-            x,
-            dbg_tag=f"L{self.layer_id:02d}_decode_ffn_hc_pre" if _dbg_layer else None,
-        )
-        bsz, q_len, dim_ = x_pre.shape
-        x_pre = self.ffn_norm(x_pre.reshape(bsz * q_len, dim_)).view(bsz, q_len, dim_)
+        if self.ffn.mega_front_enabled:
+            ffn_out, x_pre, post, comb = self.ffn.forward_mega_front(x, input_ids)
+        else:
+            x_pre, post, comb = self.ffn_hc.pre(
+                x,
+                dbg_tag=(
+                    f"L{self.layer_id:02d}_decode_ffn_hc_pre" if _dbg_layer else None
+                ),
+            )
+            bsz, q_len, dim_ = x_pre.shape
+            x_pre = self.ffn_norm(x_pre.reshape(bsz * q_len, dim_)).view(
+                bsz, q_len, dim_
+            )
+            ffn_out = self.ffn(x_pre, input_ids)
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_ffn_in", x_pre)
-        ffn_out = self.ffn(x_pre, input_ids)
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_ffn_out", ffn_out)
         x = self.ffn_hc.post(ffn_out, residual, post, comb)
