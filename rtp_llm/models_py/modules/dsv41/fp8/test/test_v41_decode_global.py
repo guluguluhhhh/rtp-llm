@@ -469,6 +469,21 @@ class V41DecodeGlobalCUDA(unittest.TestCase):
                 _assert_result(self, old, new, initial)
 
     @torch.inference_mode()
+    def test_large_batches_write_expected_slots(self):
+        for ratio in (1, 2):
+            for batch, span in ((65, 1), (193, 1), (64, 6), (1024, 6)):
+                with self.subTest(ratio=ratio, batch=batch, span=span):
+                    old = _case("cuda", ratio, batch, span)
+                    # Isolate dispatch/address coverage from RMSNorm rounding.
+                    old.x.zero_()
+                    old.owner._test_pools[CSA_STATE][_STATE_EB:].zero_()
+                    new = _clone_case(old)
+                    initial = _snapshot(old)
+                    _reference(old)
+                    _candidate(new)
+                    _assert_result(self, old, new, initial, allow_signed_zero=True)
+
+    @torch.inference_mode()
     def test_padded_main_and_table_row_strides_both_trap_modes(self):
         for ratio in (1, 2):
             for trap in ("0", "1"):
@@ -635,15 +650,15 @@ class V41DecodeGlobalCUDA(unittest.TestCase):
                 del graph
 
     @torch.inference_mode()
-    def test_token_limit_rejects_complete_metadata_without_writing_pools(self):
+    def test_large_batch_layout_gate_without_writing_pools(self):
         helper = _fused()
         for ratio in (1, 2):
             with self.subTest(ratio=ratio):
                 case = _case("cuda", ratio, 193, 1)
                 args = (case.owner, case.x, case.positions, case.req_ids, case.starts)
-                # With only the cap relaxed, all metadata/layout checks pass.
-                with patch.object(helper, "_MAX_FUSED_TOKENS", 193):
-                    self.assertTrue(helper.is_supported(*args))
+                self.assertTrue(helper.is_supported(*args))
+                # Removing the row cap must not relax the layout checks.
+                case.owner.index_head_dim = 64
                 self.assertFalse(helper.is_supported(*args))
                 before = _snapshot(case)
                 with patch.object(
@@ -669,6 +684,7 @@ class V41DecodeGlobalCUDA(unittest.TestCase):
             "sharded",
             "wrong_dtype",
             "wrong_width",
+            "empty_tokens",
         ):
             with self.subTest(label=label):
                 case = _clone_case(base)
@@ -686,6 +702,11 @@ class V41DecodeGlobalCUDA(unittest.TestCase):
                     case.x = case.x.float()
                 elif label == "wrong_width":
                     case.x = case.x[..., :256].contiguous()
+                elif label == "empty_tokens":
+                    case.x = case.x[:0]
+                    case.positions = case.positions[:0]
+                    case.req_ids = case.req_ids[:0]
+                    case.starts = case.starts[:0]
                 before = _snapshot(case)
                 helper = _fused()
                 with patch.dict(
