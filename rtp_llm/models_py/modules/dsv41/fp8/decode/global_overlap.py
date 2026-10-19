@@ -20,12 +20,21 @@ _GLOBAL_COMPUTE_STREAMS: dict[int, torch.cuda.Stream] = {}
 def is_supported(attn, x, positions, req_ids, starts) -> bool:
     if (
         os.environ.get("DSV41_OVERLAP_GLOBAL_QKV", "0") != "1"
-        or os.environ.get("MOEDBG", "0") != "0"
+        or x.ndim != 3
+        or not 0 < x.shape[0] * x.shape[1] <= 64
+    ):
+        return False
+    return supports_paged_global(attn, x, positions, req_ids, starts)
+
+
+def supports_paged_global(attn, x, positions, req_ids, starts) -> bool:
+    """Native producer/layout contract, independent of the scheduling policy."""
+    if (
+        os.environ.get("MOEDBG", "0") != "0"
         or not attn.is_kv_source
         or attn.compress_ratio not in (1, 2)
         or not x.is_cuda
         or x.ndim != 3
-        or not 0 < x.shape[0] * x.shape[1] <= 64
         or _record_tensor.should_record_layer(attn.layer_id)
         or not _v41_decode_global.is_supported(attn, x, positions, req_ids, starts)
     ):

@@ -409,6 +409,7 @@ def score_decode_indexer(
     preserve_score_dtype: bool = False,
     pad_invisible: bool = True,
     metadata: DecodeIndexerMetadata | None = None,
+    prepared_q: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> torch.Tensor | None:
     """Return [B*S,max_ctx_len], or None for an unsupported fast path.
 
@@ -451,6 +452,9 @@ def score_decode_indexer(
     ``metadata`` must be prepared from the same live positions and block table
     for this forward. It owns both logical lengths for selection/compaction and
     physical lengths for the unchanged DG scheduler/scorer.
+    ``prepared_q`` is the payload, scales and scaled weights from
+    ``prepare_indexer_q_and_weights`` for these inputs. FULL multistream can
+    prepare Q before joining the independent KV producer.
     """
     b, s, h, d = q.shape
     block_size = pool.shape[1]
@@ -461,7 +465,9 @@ def score_decode_indexer(
         return None
     from ._indexer_score import fp8_fp4_paged_indexer_score
 
-    if positions is None:
+    if prepared_q is not None:
+        q_payload, q_sf, weights = prepared_q
+    elif positions is None:
         q_payload, q_sf = prepare_indexer_q(q, weights, freqs_cis, rope_head_dim)
     else:
         q_payload, q_sf, weights = prepare_indexer_q_and_weights(
