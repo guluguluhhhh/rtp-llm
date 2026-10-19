@@ -284,9 +284,9 @@ def select_tokens(logits, plan):
     return output
 
 
-def select_decode(q, weights, freqs_cis, positions, pool, plan, *, rope_head_dim):
+def select_decode(q, weights, freqs_cis, positions, pool, plan, *, rope_head_dim, prepared=None):
     """Run fused Q preparation, official sparse score, and logical token TopK."""
-    payload, scales, weights = prepare_indexer_q_and_weights(
+    payload, scales, weights = prepared if prepared is not None else prepare_indexer_q_and_weights(
         q,
         weights,
         freqs_cis,

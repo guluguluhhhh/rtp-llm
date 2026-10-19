@@ -44,6 +44,7 @@ class DecodeQKV(NamedTuple):
     # Strided view into the same GEMM output as Main Q.
     index_q: torch.Tensor | None = None
     head_weights: torch.Tensor | None = None
+    index_prepared: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
 
 
 def _fused_v41_q_rope_supported(q, freqs_cis, rope_dim: int) -> bool:
@@ -127,12 +128,24 @@ def decode_compute_qkv(
     else:
         qr = fused_qkv[0]
     index_q = None
+    index_prepared = None
     merged = getattr(mega_attention, "merged_qb", None)
     if merged is not None and qr_quantized is not None:
         from rtp_llm.models_py.modules.dsv41._profiler import record_function_range
 
         with record_function_range("dsv41.decode.qb.merged"):
-            q, index_q = merged.forward_quantized(*qr_quantized)
+            prepared = (
+                merged.try_forward_prepared(
+                    *qr_quantized, head_weights, attn.freqs_cis, position_ids
+                )
+                # The custom consumer does not opt into PDL. Preserve the
+                # official wait-enabled DeepGEMM consumer for a PDL producer.
+                if rd == 64 and not qb_pdl else None
+            )
+            if prepared is None:
+                q, index_q = merged.forward_quantized(*qr_quantized)
+            else:
+                q, index_prepared = prepared
         q = q.unflatten(-1, (attn.n_heads, attn.head_dim))
     elif mega_attention is not None:
         # The caller selected the complete mega path before preparing Q.
@@ -176,7 +189,8 @@ def decode_compute_qkv(
         )
         if fused is not None:
             return DecodeQKV(
-                qr, fused.q, fused.kv, fused.freqs_cis, qr_quantized, True, index_q, head_weights
+                qr, fused.q, fused.kv, fused.freqs_cis, qr_quantized, True, index_q, head_weights,
+                index_prepared
             )
     if mega_attention is None:
         if getattr(attn, "skip_post_q_norm", False):
@@ -201,4 +215,5 @@ def decode_compute_qkv(
         qr_quantized=qr_quantized,
         index_q=index_q,
         head_weights=head_weights,
+        index_prepared=index_prepared,
     )

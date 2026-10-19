@@ -2833,7 +2833,8 @@ class AttentionV41FP8(AttentionFP8):
         self._shared_attention["global"] = {self.layer_id: keys}
 
     def _select_indices_decode(
-        self, x, qr, positions, qr_quantized=None, index_q=None, head_weights=None, *, overlap=None
+        self, x, qr, positions, qr_quantized=None, index_q=None, head_weights=None,
+        index_prepared=None, *, overlap=None
     ):
         """Capture-static index scoring with device-side causal/candidate masks."""
         shared = self._shared_attention
@@ -2852,14 +2853,22 @@ class AttentionV41FP8(AttentionFP8):
         flat = x.reshape(T, -1)
         from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
 
-        if index_q is None:
+        # Prepared FP4 queries are only consumed by supported paged scorers.
+        # A non-paged/backend fallback recomputes BF16 Indexer Q on demand.
+        if index_prepared is not None and not (
+            paged and decode_indexer.is_supported(
+                x.device, keys.pool.shape[1], self.index_n_heads, self.index_head_dim
+            )
+        ):
+            index_prepared = None
+        if index_q is None and index_prepared is None:
             index_q = (
                 self.index_wq.forward_quantized(*qr_quantized)
                 if qr_quantized is not None
                 and isinstance(self.index_wq, V41MXFP8Linear)
                 else self._lin(self.index_wq, qr.reshape(T, -1))
             )
-        q = index_q.view(T, self.index_n_heads, self.index_head_dim)
+        q = None if index_q is None else index_q.view(B, S, self.index_n_heads, self.index_head_dim)
         if overlap is not None:
             overlap.wait_indexer()
         weights = (
@@ -2923,19 +2932,20 @@ class AttentionV41FP8(AttentionFP8):
                     shared["decode_sparse_plan"] = plan
                 with record_function_range("dsv41.decode.sparse_mqa_select"):
                     output = sparse_decode.select_decode(
-                        q.view(B, S, self.index_n_heads, self.index_head_dim),
+                        q,
                         weights.view(B, S, self.index_n_heads),
                         self.freqs_cis,
                         positions.reshape(T),
                         keys.pool,
                         plan,
                         rope_head_dim=self.rope_head_dim,
+                        prepared=index_prepared,
                     )
                 shared["topk"] = {self.layer_id: output}
                 return output
         if paged:
-            prepared_q = None
-            if overlap is not None:
+            prepared_q = index_prepared
+            if overlap is not None and prepared_q is None:
                 prepared_q = decode_indexer.prepare_indexer_q_and_weights(
                     q.view(B, S, self.index_n_heads, self.index_head_dim),
                     weights.view(B, S, self.index_n_heads),
@@ -2944,9 +2954,10 @@ class AttentionV41FP8(AttentionFP8):
                     self.rope_head_dim,
                     weights_out_dtype=torch.bfloat16,
                 )
+            if overlap is not None:
                 overlap.wait_global()
             all_logits = decode_indexer.score_decode_indexer(
-                q.view(B, S, self.index_n_heads, self.index_head_dim),
+                q,
                 weights.view(B, S, self.index_n_heads),
                 self.freqs_cis,
                 keys.pool,
@@ -2966,7 +2977,7 @@ class AttentionV41FP8(AttentionFP8):
                 weights.float() * (self.index_head_dim * self.index_n_heads) ** -0.5
             )
             freqs = self.freqs_cis[positions]
-            q = fp4_roundtrip(rope_only(q, freqs, self.rope_head_dim))
+            q = fp4_roundtrip(rope_only(q.view(T, self.index_n_heads, self.index_head_dim), freqs, self.rope_head_dim))
         publish = (
             self.layer_id == candidate_source
             and candidate_blocks > 0
@@ -3217,7 +3228,8 @@ class AttentionV41FP8(AttentionFP8):
                 if self.is_kv_source and global_work is None:
                     self._produce_global_decode(x, positions, req, starts)
                 selected = self._select_indices_decode(
-                    x, qkv.qr, positions, qkv.qr_quantized, qkv.index_q, qkv.head_weights
+                    x, qkv.qr, positions, qkv.qr_quantized, qkv.index_q, qkv.head_weights,
+                    qkv.index_prepared
                 )
                 slots = (
                     self._decode_global_slots(selected, metadata.req_id_per_token[:T])

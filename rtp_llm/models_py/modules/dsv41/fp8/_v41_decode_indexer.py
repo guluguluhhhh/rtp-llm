@@ -456,12 +456,18 @@ def score_decode_indexer(
     ``prepare_indexer_q_and_weights`` for these inputs. FULL multistream can
     prepare Q before joining the independent KV producer.
     """
-    b, s, h, d = q.shape
+    if prepared_q is None:
+        b, s, h, d = q.shape
+        device = q.device
+    else:
+        q_payload, q_sf, weights = prepared_q
+        b, s, h, half_d = q_payload.shape
+        d, device = half_d * 2, q_payload.device
     block_size = pool.shape[1]
     logical_entries = (
         block_size if logical_entries_per_block is None else logical_entries_per_block
     )
-    if not is_supported(q.device, block_size, h, d):
+    if not is_supported(device, block_size, h, d):
         return None
     from ._indexer_score import fp8_fp4_paged_indexer_score
 
@@ -481,7 +487,7 @@ def score_decode_indexer(
     if metadata is None:
         lengths = context_lens.to(torch.int32).contiguous()
         physical_lengths = torch.empty_like(lengths)
-        safe_table = torch.empty(block_table.shape, dtype=torch.int32, device=q.device)
+        safe_table = torch.empty(block_table.shape, dtype=torch.int32, device=device)
         _prepare_paged_metadata_kernel[
             (triton.cdiv(max(b * s, block_table.numel()), 128),)
         ](
@@ -523,7 +529,7 @@ def score_decode_indexer(
         b * s,
         max_ctx_len,
         dtype=logits.dtype if preserve_score_dtype else torch.float32,
-        device=q.device,
+        device=device,
     )
     if pad_invisible:
         _compact_logits_kernel[(b * s, triton.cdiv(max_ctx_len, 1024))](
