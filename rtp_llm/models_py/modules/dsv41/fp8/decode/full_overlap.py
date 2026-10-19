@@ -20,6 +20,19 @@ from rtp_llm.models_py.modules.dsv41.fp8.decode.global_overlap import (
 _INDEXER_STREAMS: dict[int, torch.cuda.Stream] = {}
 
 
+def _qb_pdl_enabled(mega) -> bool:
+    if (
+        os.environ.get("DSV41_FULL_DECODE_QB_PDL", "0") != "1"
+        or getattr(mega, "merged_qb", None) is None
+    ):
+        return False
+    import deep_gemm
+
+    # Do not change the engine-global DeepGEMM launch policy. Its QB consumer
+    # must already launch with PDL and wait before reading the producer data.
+    return hasattr(deep_gemm, "get_pdl") and deep_gemm.get_pdl()
+
+
 def is_supported(attn, x, positions, req_ids, starts) -> bool:
     if (
         os.environ.get("DSV41_FULL_DECODE_MULTISTREAM", "0") != "1"
@@ -159,6 +172,7 @@ def try_full_decode(
             swa_slots=None if swa_slots is None else swa_slots[:rows],
             mega_attention=mega,
             shared_input_quant=shared_input_quant,
+            qb_pdl=_qb_pdl_enabled(mega),
         )
         if not qkv.swa_written:
             attn._decode_write_swa_fp8(qkv.kv, batch, span, metadata)

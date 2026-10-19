@@ -257,6 +257,22 @@ class FullOverlapCPUTest(unittest.TestCase):
                             project.call_args.kwargs["shared_input_quant"], quantized
                         )
 
+    def test_qb_pdl_gate_does_not_change_deepgemm_policy(self):
+        import sys
+
+        dg = SimpleNamespace(get_pdl=Mock(return_value=True), set_pdl=Mock())
+        mega = SimpleNamespace(merged_qb=object())
+        with patch.dict(sys.modules, {"deep_gemm": dg}):
+            with patch.dict(os.environ, {"DSV41_FULL_DECODE_QB_PDL": "0"}):
+                self.assertFalse(full_overlap._qb_pdl_enabled(mega))
+            dg.get_pdl.assert_not_called()
+            with patch.dict(os.environ, {"DSV41_FULL_DECODE_QB_PDL": "1"}):
+                self.assertFalse(full_overlap._qb_pdl_enabled(None))
+                self.assertTrue(full_overlap._qb_pdl_enabled(mega))
+                dg.get_pdl.return_value = False
+                self.assertFalse(full_overlap._qb_pdl_enabled(mega))
+            dg.set_pdl.assert_not_called()
+
     def test_gate_rejects_cpu_reuse_tp_and_disabled_without_native_access(self):
         attn = SimpleNamespace(
             is_kv_source=True,
@@ -633,6 +649,14 @@ def update_full_positions(case):
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class FullOverlapCudaTest(unittest.TestCase):
+    def test_qb_pdl_dynamic_graph(self):
+        import deep_gemm
+
+        if not hasattr(deep_gemm, "get_pdl") or not deep_gemm.get_pdl():
+            self.skipTest("DeepGEMM PDL consumer must already be enabled")
+        with patch.dict(os.environ, {"DSV41_FULL_DECODE_QB_PDL": "1"}):
+            self.test_real_full_graph_replay_and_changed_inputs()
+
     @torch.inference_mode()
     def test_real_full_graph_replay_and_changed_inputs(self):
         if torch.cuda.get_device_capability()[0] != 10:
