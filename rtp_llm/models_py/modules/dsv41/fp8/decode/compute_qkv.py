@@ -43,6 +43,7 @@ class DecodeQKV(NamedTuple):
     swa_written: bool = False
     # Strided view into the same GEMM output as Main Q.
     index_q: torch.Tensor | None = None
+    head_weights: torch.Tensor | None = None
 
 
 def _fused_v41_q_rope_supported(q, freqs_cis, rope_dim: int) -> bool:
@@ -80,6 +81,7 @@ def decode_compute_qkv(
     mega_attention=None,
     shared_input_quant=None,
     qb_pdl: bool = False,
+    fuse_head_weights: bool = True,
 ) -> DecodeQKV:
     """Decode Q/KV path — RMSNorm + LoRA Q + KV linear + fused RMSNorm-RoPE.
 
@@ -97,7 +99,16 @@ def decode_compute_qkv(
         try_project_quantized_qkv,
     )
 
-    quantized_qkv = try_project_quantized_qkv(
+    from rtp_llm.models_py.modules.dsv41.fp8._v41_front_gemm import project
+
+    # FULL overlap already computes head weights on its auxiliary stream.
+    front = (
+        project(attn, x, quantized_input=shared_input_quant, pdl=qb_pdl)
+        if fuse_head_weights
+        else None
+    )
+    head_weights = None if front is None else front[3]
+    quantized_qkv = front[:3] if front is not None else try_project_quantized_qkv(
         attn,
         x,
         quantized_input=shared_input_quant,
@@ -165,7 +176,7 @@ def decode_compute_qkv(
         )
         if fused is not None:
             return DecodeQKV(
-                qr, fused.q, fused.kv, fused.freqs_cis, qr_quantized, True, index_q
+                qr, fused.q, fused.kv, fused.freqs_cis, qr_quantized, True, index_q, head_weights
             )
     if mega_attention is None:
         if getattr(attn, "skip_post_q_norm", False):
@@ -189,4 +200,5 @@ def decode_compute_qkv(
         freqs_cis=freqs_cis,
         qr_quantized=qr_quantized,
         index_q=index_q,
+        head_weights=head_weights,
     )

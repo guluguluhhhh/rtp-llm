@@ -699,6 +699,10 @@ class AttentionV41FP8(AttentionFP8):
                 if merged is not None:
                     self._qb_weight_owner = None
 
+        from ._v41_front_gemm import prepare as prepare_front
+
+        prepare_front(self)
+
     def _mega_position_chunks(self, positions, rows, chunk):
         # All layers consume the same absolute query positions. Keep conversion
         # and chunk views within this forward, including during graph capture.
@@ -2829,7 +2833,7 @@ class AttentionV41FP8(AttentionFP8):
         self._shared_attention["global"] = {self.layer_id: keys}
 
     def _select_indices_decode(
-        self, x, qr, positions, qr_quantized=None, index_q=None, *, overlap=None
+        self, x, qr, positions, qr_quantized=None, index_q=None, head_weights=None, *, overlap=None
     ):
         """Capture-static index scoring with device-side causal/candidate masks."""
         shared = self._shared_attention
@@ -2859,7 +2863,9 @@ class AttentionV41FP8(AttentionFP8):
         if overlap is not None:
             overlap.wait_indexer()
         weights = (
-            F.linear(flat, self.index_weights) if overlap is None else overlap.weights
+            overlap.weights if overlap is not None else (
+                F.linear(flat, self.index_weights) if head_weights is None else head_weights
+            )
         )
         indexer_metadata = None if overlap is None else overlap.metadata
         if (
@@ -3211,7 +3217,7 @@ class AttentionV41FP8(AttentionFP8):
                 if self.is_kv_source and global_work is None:
                     self._produce_global_decode(x, positions, req, starts)
                 selected = self._select_indices_decode(
-                    x, qkv.qr, positions, qkv.qr_quantized, qkv.index_q
+                    x, qkv.qr, positions, qkv.qr_quantized, qkv.index_q, qkv.head_weights
                 )
                 slots = (
                     self._decode_global_slots(selected, metadata.req_id_per_token[:T])
@@ -3237,7 +3243,7 @@ class AttentionV41FP8(AttentionFP8):
             if self.is_kv_source and global_work is None:
                 self._produce_global_decode(x, positions, req, starts)
             selected = self._select_indices_decode(
-                x, qkv.qr, positions, qkv.qr_quantized
+                x, qkv.qr, positions, qkv.qr_quantized, head_weights=qkv.head_weights
             )
             from rtp_llm.models_py.modules.dsv41.fp8._v41_fp4_decode_attn import (
                 fp4_dual_decode_attention,
