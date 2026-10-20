@@ -56,7 +56,7 @@ def start_plan(attn, keys, lengths, *, query_len, producer_stream=None):
     """Publish planner inputs; optionally defer the fork until attention ends."""
     if os.environ.get("DSV41_SPARSE_PLAN_LAUNCH", "candidates") == "attention_end":
         if (
-            os.environ.get("DSV41_OVERLAP_SPARSE_PLAN", "0") == "1"
+            os.environ.get("DSV41_OVERLAP_SPARSE_PLAN", "1") == "1"
             and attn.layer_id == int(attn.v41_config.get("candidate_source_layer_id", -1))
         ):
             attn._shared_attention["decode_sparse_plan_pending"] = (
@@ -77,7 +77,7 @@ def finish_attention(attn):
 
 
 def _launch_plan(attn, keys, lengths, *, query_len, producer_stream=None):
-    """Opt-in overlap; cold capture and unsupported layouts keep serial planning.
+    """Default-on overlap; cold capture and unsupported layouts stay serial.
 
     Call only after the candidate source has published its complete result.
     The first reindex consumer must wait before using the plan. Warm-up and
@@ -87,7 +87,7 @@ def _launch_plan(attn, keys, lengths, *, query_len, producer_stream=None):
     shared = attn._shared_attention
     candidates = shared.get("candidates")
     if (
-        os.environ.get("DSV41_OVERLAP_SPARSE_PLAN", "0") != "1"
+        os.environ.get("DSV41_OVERLAP_SPARSE_PLAN", "1") != "1"
         or attn.layer_id != int(attn.v41_config.get("candidate_source_layer_id", -1))
         or attn.kv_source_layer_id != attn.layer_id
         or attn.compress_ratio != 1

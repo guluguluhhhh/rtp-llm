@@ -16,6 +16,27 @@ from rtp_llm.models_py.modules.dsv41.fp8.test import test_v41_sparse_decode as c
 
 
 class SparsePlanOverlapCPU(unittest.TestCase):
+    def test_default_launch_and_explicit_disable(self):
+        shared = {"candidates": Mock()}
+        source = SimpleNamespace(layer_id=20, kv_source_layer_id=20,
+                                 compress_ratio=1, _shared_attention=shared,
+                                 v41_config={"candidate_source_layer_id": 20,
+                                             "candidate_block_size": 8})
+        for mode in ("candidates", "attention_end"):
+            with self.subTest(mode=mode), patch.dict(
+                os.environ, {"DSV41_SPARSE_PLAN_LAUNCH": mode}
+            ), patch.object(sparse, "is_supported", return_value=False) as supported:
+                os.environ.pop("DSV41_OVERLAP_SPARSE_PLAN", None)
+                overlap.start_plan(source, Mock(), Mock(), query_len=6)
+                overlap.finish_attention(source)
+                supported.assert_called_once_with(shared["candidates"])
+                supported.reset_mock()
+                os.environ["DSV41_OVERLAP_SPARSE_PLAN"] = "0"
+                overlap.start_plan(source, Mock(), Mock(), query_len=6)
+                overlap.finish_attention(source)
+                supported.assert_not_called()
+                self.assertNotIn("decode_sparse_plan_pending", shared)
+
     def test_full_fast_return_finishes_pending_plan_launch(self):
         from rtp_llm.models_py.modules.dsv41.fp8.decode import full_overlap
         from rtp_llm.models_py.modules.dsv41.fp8.decode import rope_metadata
@@ -171,7 +192,9 @@ class SparsePlanOverlapCUDA(unittest.TestCase):
                 torch.testing.assert_close(actual.sort(-1).values, expected.sort(-1).values,
                                            rtol=0, atol=0)
 
-        with torch.no_grad(), patch.dict(os.environ, {"DSV41_OVERLAP_SPARSE_PLAN": "1"}):
+        with torch.no_grad(), patch.dict(os.environ):
+            # Exercise the production default, not an explicit opt-in.
+            os.environ.pop("DSV41_OVERLAP_SPARSE_PLAN", None)
             with patch.object(sparse, "make_plan", wraps=sparse.make_plan) as planner:
                 eager = forward()
                 self.assertEqual(planner.call_count, 1)
