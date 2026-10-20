@@ -3041,7 +3041,10 @@ class AttentionV41FP8(AttentionFP8):
 
                         # Reuse the source's int32 lengths; plan/metadata need
                         # no data produced by the later reindex layer.
-                        start_plan(self, keys, visible_i32, query_len=S)
+                        start_plan(
+                            self, keys, visible_i32, query_len=S,
+                            producer_stream=None if overlap is None else overlap.auxiliary,
+                        )
                     elif candidate_source >= 0 and self.layer_id > candidate_source:
                         decode_topk.mask_candidates(
                             all_logits, cached_mask[1], candidate_size

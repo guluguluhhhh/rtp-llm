@@ -52,7 +52,7 @@ def has_consumer(attn):
     )
 
 
-def start_plan(attn, keys, lengths, *, query_len):
+def start_plan(attn, keys, lengths, *, query_len, producer_stream=None):
     """Publish planner inputs; optionally defer the fork until attention ends."""
     if os.environ.get("DSV41_SPARSE_PLAN_LAUNCH", "candidates") == "attention_end":
         if (
@@ -60,10 +60,10 @@ def start_plan(attn, keys, lengths, *, query_len):
             and attn.layer_id == int(attn.v41_config.get("candidate_source_layer_id", -1))
         ):
             attn._shared_attention["decode_sparse_plan_pending"] = (
-                attn, keys, lengths, query_len
+                attn, keys, lengths, query_len, producer_stream
             )
         return
-    _launch_plan(attn, keys, lengths, query_len=query_len)
+    _launch_plan(attn, keys, lengths, query_len=query_len, producer_stream=producer_stream)
 
 
 def finish_attention(attn):
@@ -72,11 +72,11 @@ def finish_attention(attn):
     pending = shared.get("decode_sparse_plan_pending")
     if pending is not None and pending[0] is attn:
         shared.pop("decode_sparse_plan_pending")
-        _, keys, lengths, query_len = pending
-        _launch_plan(attn, keys, lengths, query_len=query_len)
+        _, keys, lengths, query_len, producer_stream = pending
+        _launch_plan(attn, keys, lengths, query_len=query_len, producer_stream=producer_stream)
 
 
-def _launch_plan(attn, keys, lengths, *, query_len):
+def _launch_plan(attn, keys, lengths, *, query_len, producer_stream=None):
     """Opt-in overlap; cold capture and unsupported layouts keep serial planning.
 
     Call only after the candidate source has published its complete result.
@@ -130,6 +130,11 @@ def _launch_plan(attn, keys, lengths, *, query_len):
     inputs = (candidates, lengths, table) + (() if flags is None else (flags,))
     work = SparsePlanWork(current, stream, inputs)
     stream.wait_stream(current)
+    # FULL publishes candidate tensors while their writes are still queued on
+    # its indexer stream. Order the planner directly after that producer,
+    # without joining it onto (and blocking) the main attention stream.
+    if producer_stream is not None:
+        stream.wait_stream(producer_stream)
     try:
         with torch.cuda.stream(stream):
             with record_function_range("dsv41.decode.sparse_mqa_plan_async"):
