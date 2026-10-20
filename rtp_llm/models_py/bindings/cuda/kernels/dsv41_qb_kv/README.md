@@ -1,8 +1,10 @@
-# Native V4.1 merged-QB / SWA producer
+# Native V4.1 QB / SWA / ready-index producer
 
 This backend is opt-in and qualified on runtime SM103 with 148 SMs. The
-existing DeepGEMM/Triton paths remain the fallback. It does not replace FlashMLA,
-Global/Index-K compression, selection, or output projection.
+existing DeepGEMM/Triton paths remain the fallback. FULL uses merged QB + SWA;
+REUSE supports Q + SWA + ready-index mapping and an explicit native FlashMLA
+PDL consumer. Global/Index-K compression, selection and output projection stay
+outside this producer.
 
 ## Source and build
 
@@ -21,7 +23,7 @@ headers' unsupported-architecture `brkpt` fallbacks without claiming SM100
 support on other architectures. Other platforms expose an unavailable stub.
 
 The native interface takes explicit output tensors, tile variant, cluster count
-and incoming PDL policy; it has no process-global launch state and no runtime
+and independent incoming/outgoing PDL policy; it has no process-global launch state and no runtime
 JIT loader. Torch's current device/stream is used. C++ validates tensors before
 launch, and Python performs metadata-only admission before allocating outputs.
 
@@ -37,10 +39,16 @@ launch, and Python performs metadata-only admission before allocating outputs.
   Write slots must be unique, as in the unfused producer.
 - Main Q stays unnormalized/unrotated for the V4.1 Mega consumer. KV reduction,
   FMA operand order and BF16 boundary follow the target Triton implementation.
-- Incoming Qnorm→QB PDL waits before any payload read. There is no outgoing
-  producer→FlashMLA early trigger.
+- REUSE uses existing Q-only `[32768,1280]` weights/SF without repacking. Its
+  contiguous BF16 Q output has row stride 32768. Ready local TopK is read-only;
+  mapping produces a separate contiguous int32 physical-slot tensor. Padded
+  block-table/local-TopK row strides are supported by the producer.
+- Incoming Qnorm→QB PDL waits before any payload read. On the REUSE PDL route,
+  every CTA triggers the next grid after cluster setup; the FlashMLA consumer
+  initializes its barriers/TMEM, then waits before reading Q, indices or cache.
+  See `3rdparty/flashmla/README.md` for the source pin and coherent-load patch.
 
-Initial dispatch (M is B×S token rows):
+FULL dispatch (M is B×S token rows, N36864):
 
 | M | Kernel geometry | Cluster count | KV workers per CTA |
 | --- | --- | --- | --- |
@@ -49,10 +57,17 @@ Initial dispatch (M is B×S token rows):
 | 256 | non-swap BM256/BN256, one accumulator stage | 72 | 4 warps |
 | 512 | non-swap BM256/BN256, one accumulator stage | 72 | 4 warps |
 
-M384 and all unqualified layouts keep DeepGEMM. The BN224/double-accumulator and
-swap BM256 variants are retained as explicit native tuning controls, not enabled
-by the Python dispatch. The non-swap fused launch retains the measured 512-thread
-geometry; the unused tail warps do not participate in the GEMM barriers.
+FULL M384 keeps DeepGEMM. REUSE has a separate N32768 dispatch:
+
+| M | Kernel geometry | Clusters | KV / index workers per CTA |
+| --- | --- | --- | --- |
+| 128 | swap BM128 | 64 | 1 / 8 warps |
+| 192, 384 | swap BM192 | 64 | 1 / 8 warps |
+| 256, 512 | non-swap BM256/BN224, two accumulator stages | 74 | 4 / 5 warps |
+
+REUSE launches 512 threads. Independent index warps are essential: serializing
+mapping after KV in swap warp 3 caused the M192/M384 regression during integration.
+The pure/FULL swap variants retain 256 threads. Side warps do not join GEMM barriers.
 
 ## Rollout and validation
 
@@ -62,11 +77,15 @@ Both default to `0`. Existing FULL multistream and Qnorm PDL policy are preserve
 The decode wiring excludes Reindex so its default-on front projection and
 QB/query-preparation fusion retain their own interfaces and prepared outputs.
 
-Full current-layer TopK depends on this GEMM's Index Q, so its conversion cannot
+FULL current-layer TopK depends on this GEMM's Index Q, so its conversion cannot
 join this launch. `DSV41_FUSED_TOPK_SLOTS=1` separately combines finite publication
-and slot conversion. REUSE ready-index **3→1 is not implemented here**.
+and slot conversion. `DSV41_FUSED_READY_QKV=1` enables REUSE **3→1**, default 0.
+Within that admitted route, `DSV41_READY_FLASHMLA_PDL=1` (default 1) selects the
+source-pinned native consumer with an outgoing PDL edge. Setting it to 0 keeps
+the fused producer but uses the original wheel consumer. FULL, Reindex,
+sharded CP and unsupported metadata do not enter the REUSE route.
 
-Run the new `test_v41_qb_kv_x86` and `test_v41_topk_slots_x86` Bazel targets on a
+Run `test_v41_qb_kv_x86`, `test_v41_topk_slots_x86` and `test_v41_ready_qkv_x86` on a
 matching RTP wheel/build, plus the existing merged-QB/full-decode suites. The
 portable performance runner is `rtp_llm/test/perf_test/dsv41_qb_kv.py`; it requires
 a clean official DeepGEMM testing checkout at
@@ -74,3 +93,7 @@ a clean official DeepGEMM testing checkout at
 It saves per-replay CUPTI traces and exact production-kernel envelopes after
 8 GB flushes. Its isolated producer regions exclude attention and full-layer
 competition; they are not a full-layer speedup claim.
+
+REUSE correctness, exact 3→1/consumer envelopes, PDL graph-edge audit and the
+remaining full-build/model validation limits are recorded in
+`docs/benchmark/dsv41_ready_qkv_integration_results.md`.

@@ -1,5 +1,10 @@
 # V4.1 QB/KV 融合实施与验收记录
 
+> 本文保留 2026-10-20 的 FULL 接入快照。2026-10-21 已另行接入 REUSE
+> **Q/KV/index 3→1 + FlashMLA PDL**，见
+> [增量实现与验收](dsv41_ready_qkv_integration_results.md)。下文“未接入 REUSE/PDL”
+> 仅描述当时提交，不代表当前分支。
+
 2026-10-20。实现分支 `codex/dsv41-qkv-integration-review`，代码提交
 `50dbe007d8ecfdc75230dd99c6d6725e13e9d8b8`。已从原评审基线 `d6826d6`
 rebase 到 `guluguluhhhh/full_layer_optimize` 的

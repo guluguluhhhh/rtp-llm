@@ -1,5 +1,9 @@
 # DSv4.1 QB / KV / index 融合接入方案
 
+> 2026-10-21 更新：REUSE **3→1 + FlashMLA PDL** 已完成源码接线和精确 TU GPU 测试，
+> 结果及剩余整包/模型验收见
+> [增量实现与验收](dsv41_ready_qkv_integration_results.md)。本文保留最初方案供追溯。
+
 评审日期：2026-10-20。目标分支 `guluguluhhhh/rtp-llm:full_layer_optimize`，
 固定提交 `d6826d660d9cdd9989faa955b62295a25a83b442`。
 对应 [PR #1532](https://github.com/alibaba/rtp-llm/pull/1532)，base 为
