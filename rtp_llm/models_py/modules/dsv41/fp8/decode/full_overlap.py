@@ -1,4 +1,4 @@
-"""Opt-in FULL source decode fork/join inside the engine's parent CUDA Graph."""
+"""Default-on FULL source decode fork/join with eligibility-based fallback."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ _INDEXER_STREAMS: dict[int, torch.cuda.Stream] = {}
 
 def _qb_pdl_enabled(mega) -> bool:
     if (
-        os.environ.get("DSV41_FULL_DECODE_QB_PDL", "0") != "1"
+        os.environ.get("DSV41_FULL_DECODE_QB_PDL", "1") != "1"
         or getattr(mega, "merged_qb", None) is None
     ):
         return False
@@ -35,7 +35,7 @@ def _qb_pdl_enabled(mega) -> bool:
 
 def is_supported(attn, x, positions, req_ids, starts) -> bool:
     if (
-        os.environ.get("DSV41_FULL_DECODE_MULTISTREAM", "0") != "1"
+        os.environ.get("DSV41_FULL_DECODE_MULTISTREAM", "1") != "1"
         or not x.is_cuda
         or not attn.is_kv_source
         or not attn.is_index_source
@@ -93,7 +93,7 @@ def try_full_decode(
 ):
     """Return None before forking when unsupported or not warmed for capture."""
     if (
-        os.environ.get("DSV41_FULL_DECODE_MULTISTREAM", "0") != "1"
+        os.environ.get("DSV41_FULL_DECODE_MULTISTREAM", "1") != "1"
         or not attn.is_kv_source
         or not attn.is_index_source
         or attn.layer_id != attn.kv_source_layer_id

@@ -2,6 +2,7 @@
 
 import contextlib
 import os
+import sys
 import unittest
 from types import MethodType, SimpleNamespace
 from unittest.mock import Mock, patch
@@ -161,7 +162,9 @@ class GlobalOverlapCPUTest(unittest.TestCase):
                     _select_indices_decode=select,
                     _produce_global_decode=Mock(),
                 )
-                with patch.object(
+                with patch.dict(
+                    os.environ, {"DSV41_FULL_DECODE_MULTISTREAM": "0"}
+                ), patch.object(
                     overlap, "start_global_decode", return_value=work
                 ), patch(
                     "rtp_llm.models_py.modules.dsv41.fp8.decode.compute_qkv.decode_compute_qkv",
@@ -179,6 +182,34 @@ class GlobalOverlapCPUTest(unittest.TestCase):
 
 
 class FullOverlapCPUTest(unittest.TestCase):
+    def setUp(self):
+        env = patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("DSV41_FULL_DECODE_MULTISTREAM", None)
+        os.environ.pop("DSV41_FULL_DECODE_QB_PDL", None)
+
+    def test_default_multistream_preserves_native_eligibility(self):
+        attn = SimpleNamespace(
+            is_kv_source=True,
+            is_index_source=True,
+            layer_id=2,
+            kv_source_layer_id=2,
+            tp_size=1,
+            index_n_heads=32,
+            index_head_dim=128,
+            index_topk=512,
+        )
+        x = SimpleNamespace(is_cuda=True)
+        for supported in (False, True):
+            with self.subTest(supported=supported), patch.object(
+                full_overlap, "supports_paged_global", return_value=supported
+            ) as native:
+                self.assertEqual(
+                    full_overlap.is_supported(attn, x, None, None, None), supported
+                )
+                native.assert_called_once_with(attn, x, None, None, None)
+
     def test_attention_body_preserves_shared_input_in_full_path(self):
         from rtp_llm.models_py.modules.dsv41.attn_type import SWA_KV
 
@@ -194,6 +225,7 @@ class FullOverlapCPUTest(unittest.TestCase):
             supports_input=lambda _: True,
             supports_decode=lambda *args: True,
             supports_pool=lambda *args: True,
+            merged_qb=object(),
         )
         attn = SimpleNamespace(
             _begin_forward=lambda: None,
@@ -218,8 +250,7 @@ class FullOverlapCPUTest(unittest.TestCase):
         glob.device = aux.device = torch.device("cuda", 0)
         attn._full_decode_overlap_warmed = {(0, tuple(x.shape), 123, 456)}
         with patch.dict(
-            os.environ,
-            {"DSV41_FULL_DECODE_MULTISTREAM": "1", "DSV41_FULL_DECODE_QB_PDL": "0"},
+            sys.modules, {"deep_gemm": SimpleNamespace(get_pdl=lambda: True)}
         ), patch.object(full_overlap, "is_supported", return_value=True), patch.object(
             full_overlap, "_GLOBAL_COMPUTE_STREAMS", {0: glob}
         ), patch.object(
@@ -256,22 +287,28 @@ class FullOverlapCPUTest(unittest.TestCase):
                         self.assertIs(
                             project.call_args.kwargs["shared_input_quant"], quantized
                         )
+                        self.assertTrue(project.call_args.kwargs["qb_pdl"])
 
     def test_qb_pdl_gate_does_not_change_deepgemm_policy(self):
-        import sys
-
         dg = SimpleNamespace(get_pdl=Mock(return_value=True), set_pdl=Mock())
         mega = SimpleNamespace(merged_qb=object())
         with patch.dict(sys.modules, {"deep_gemm": dg}):
             with patch.dict(os.environ, {"DSV41_FULL_DECODE_QB_PDL": "0"}):
                 self.assertFalse(full_overlap._qb_pdl_enabled(mega))
             dg.get_pdl.assert_not_called()
-            with patch.dict(os.environ, {"DSV41_FULL_DECODE_QB_PDL": "1"}):
-                self.assertFalse(full_overlap._qb_pdl_enabled(None))
-                self.assertTrue(full_overlap._qb_pdl_enabled(mega))
-                dg.get_pdl.return_value = False
-                self.assertFalse(full_overlap._qb_pdl_enabled(mega))
+            for env in ({}, {"DSV41_FULL_DECODE_QB_PDL": "1"}):
+                with self.subTest(env=env), patch.dict(os.environ, env):
+                    dg.get_pdl.reset_mock()
+                    dg.get_pdl.return_value = True
+                    self.assertFalse(full_overlap._qb_pdl_enabled(None))
+                    self.assertFalse(full_overlap._qb_pdl_enabled(SimpleNamespace()))
+                    dg.get_pdl.assert_not_called()
+                    self.assertTrue(full_overlap._qb_pdl_enabled(mega))
+                    dg.get_pdl.return_value = False
+                    self.assertFalse(full_overlap._qb_pdl_enabled(mega))
             dg.set_pdl.assert_not_called()
+        with patch.dict(sys.modules, {"deep_gemm": SimpleNamespace()}):
+            self.assertFalse(full_overlap._qb_pdl_enabled(mega))
 
     def test_gate_rejects_cpu_reuse_tp_and_disabled_without_native_access(self):
         attn = SimpleNamespace(

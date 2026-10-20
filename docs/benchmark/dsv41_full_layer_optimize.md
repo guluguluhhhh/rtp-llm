@@ -2,11 +2,12 @@
 
 Checkpoint: 2026-10-20, branch `full_layer_optimize` in
 [guluguluhhhh/rtp-llm](https://github.com/guluguluhhhh/rtp-llm/tree/full_layer_optimize).
-This is an experimental branch, not a production default or a completed model
-accuracy/performance validation.
+The eligible FULL decode path enables multistream and minimal QB PDL by default.
+This does not constitute completed whole-model accuracy/performance validation.
 
 Submission scope: retain the existing three-stream FULL schedule and only the
-Q-norm -> merged QB PDL edge, both opt-in. Broader producer/consumer PDL,
+Q-norm -> merged QB PDL edge, both default-on within their eligibility gates.
+Broader producer/consumer PDL,
 custom Index K GEMM, Index Q fork/warp tuning, and Reindex/Reuse scheduling are
 not included. The experimental results and follow-up plans below are historical
 context, not additional code paths or acceptance results for the rebased branch.
@@ -21,8 +22,8 @@ In particular, do not modify DeepGEMM to continue this experiment.
 | --- | --- |
 | Global producer | Remove the row-count cap on the existing fused Global producer; retain layout/state eligibility checks |
 | Indexer metadata | Fuse/share compatible decode metadata within a forward; retain the uncached fallback when RoPE reuse is disabled |
-| FULL multistream | Add default-off, three-stream FULL decode scheduling and correctness tests |
-| Minimal PDL | Default-off Q-norm producer PDL trigger, tests, portable experiment runner and this document |
+| FULL multistream | Add default-on, three-stream FULL decode scheduling and correctness tests |
+| Minimal PDL | Default-on Q-norm producer PDL trigger, gated on DeepGEMM's existing policy, plus tests and the portable experiment runner |
 
 The current PDL code covers **one edge: Q norm/quant -> merged QB**. It does not
 implement a pdlrt-style whole-layer PDL chain. The existing multistream design
@@ -39,8 +40,8 @@ accuracy test, or whole-model benchmark.
 
 | Setting | Meaning |
 | --- | --- |
-| `DSV41_FULL_DECODE_MULTISTREAM=1` | Opt into FULL fork/join; default is `0` |
-| `DSV41_FULL_DECODE_QB_PDL=1` | Allow the Q-norm producer trigger in the eligible FULL multistream path; default is `0` |
+| `DSV41_FULL_DECODE_MULTISTREAM=1` | Enable eligible FULL fork/join; default is `1`, set `0` to disable |
+| `DSV41_FULL_DECODE_QB_PDL=1` | Allow the Q-norm producer trigger in the eligible FULL multistream path; default is `1`, set `0` to disable |
 | `deep_gemm.get_pdl()` | Must already be true for that producer trigger to be enabled |
 | `DSV41_FUSE_INDEXER_METADATA=1` | Fused/shared metadata; keep enabled for these comparisons |
 | `DSV41_REUSE_DECODE_ROPE=1` | Required for shared indexer metadata; `0` uses the uncached preparation path |
@@ -52,6 +53,12 @@ it. The standalone runner sets/restores the policy around warmup/capture in its
 own process. Do not toggle it underneath a running inference service. Changing
 an environment variable or library policy does not rewrite an already captured
 graph; capture a new graph for each policy.
+
+To restore the serial FULL path without the new producer trigger, set both
+`DSV41_FULL_DECODE_MULTISTREAM=0` and `DSV41_FULL_DECODE_QB_PDL=0` before startup.
+Keep `DSV41_OVERLAP_GLOBAL_QKV=0` to disable the older overlap experiment too.
+Disabling only QB PDL preserves FULL multistream. These switches do not disable
+DeepGEMM's own PDL policy for other kernels.
 
 The FULL gate checks TP1, SM10x/paged native-producer support, matching FULL
 KV/index ownership, Index H32/D128/TopK512, input/cache/state layout and other
