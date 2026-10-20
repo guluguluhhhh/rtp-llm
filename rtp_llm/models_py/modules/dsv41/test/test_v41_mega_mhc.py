@@ -160,6 +160,47 @@ class V41MegaMHCCudaTest(unittest.TestCase):
         torch.manual_seed(41)
 
     @torch.inference_mode()
+    def test_moe_consumer_quantization_and_padding_are_exact(self):
+        from rtp_llm.models_py.modules.dsv41.moe.strategies.mega_se import MegaMoEStrategySE
+        from rtp_llm.models_py.modules.dsv41.moe._mega_input_pack_triton import fused_pack_mega_moe_inputs_optimized
+        from rtp_llm.models_py.modules.dsv41.moe._mega_se_input_pack_triton import stage_mega_moe_se_shared_l1_scales
+
+        for tokens, block_m in ((1, 16), (7, 32), (64, 64), (128, 128), (384, 32)):
+            for scale in (0.0, 1e-5, 1.0):
+                case = make_case((tokens,))
+                case["norm"].weight.mul_(scale)
+                expected = try_fused_post_pre(**case)
+                active = (tokens + block_m - 1) // block_m * ((block_m + 127) // 128 * 128)
+                buf = SimpleNamespace(
+                    x=torch.empty((tokens, _DIM), dtype=torch.float8_e4m3fn, device="cuda"),
+                    x_sf=torch.empty((tokens, 40), dtype=torch.int32, device="cuda"),
+                    shared_l1_acts_sf=torch.full((40, active + 128), 876543, dtype=torch.int32, device="cuda").T,
+                )
+                strategy = SimpleNamespace(
+                    cfg=SimpleNamespace(max_tokens_per_rank=tokens),
+                    _input_packer=SimpleNamespace(name="fused"),
+                    _mega_buf=buf, _block_m=lambda _: block_m,
+                )
+                outputs = MegaMoEStrategySE.prepare_mhc_quant_outputs(strategy, tokens)
+                self.assertIsNotNone(outputs)
+                actual = try_fused_post_pre(**case, moe_quant_outputs=outputs)
+                for got, ref in zip(actual, expected):
+                    self.assertTrue(torch.equal(got, ref))
+                weights = torch.ones((tokens, 6), device="cuda")
+                indices = torch.zeros((tokens, 6), dtype=torch.int64, device="cuda")
+                q, sf = torch.empty_like(buf.x), torch.empty_like(buf.x_sf)
+                fused_pack_mega_moe_inputs_optimized(
+                    expected[1], weights, indices, q, sf,
+                    torch.empty_like(indices), torch.empty_like(weights),
+                )
+                self.assertTrue(torch.equal(q.view(torch.uint8), buf.x.view(torch.uint8)))
+                self.assertTrue(torch.equal(sf, buf.x_sf))
+                shared = torch.full_like(buf.shared_l1_acts_sf, 876543)
+                stage_mega_moe_se_shared_l1_scales(sf, shared, tokens, block_m)
+                stage_mega_moe_se_shared_l1_scales(buf.x_sf, buf.shared_l1_acts_sf, tokens, block_m)
+                self.assertTrue(torch.equal(shared, buf.shared_l1_acts_sf))
+
+    @torch.inference_mode()
     def test_fp8_compact_padding(self):
         case = make_case((1, 6))
         result = try_fused_post_pre(**case, original_tokens=512, output_fp8=True)

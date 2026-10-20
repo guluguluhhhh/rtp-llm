@@ -233,6 +233,7 @@ def try_fused_post_pre(
     original_tokens: int | None = None,
     reuse_residual: bool = False,
     output_fp8: bool = False,
+    moe_quant_outputs: dict | None = None,
 ) -> MHCOutput | MHCQuantizedOutput | None:
     """Return ``(residual, normalized_input, post, comb)`` or use the old path.
 
@@ -249,6 +250,8 @@ def try_fused_post_pre(
     is 2**-22 (legacy/v3: 2**-33), so tiny inputs may underflow to zero
     and are not bitwise equivalent to the legacy quantization path.
     """
+    if output_fp8 and moe_quant_outputs is not None:
+        return None
     if not is_supported(attn_out, residual, post, comb, previous, next_hc, norm):
         return None
     operation = _get_mega_mhc()
@@ -261,6 +264,8 @@ def try_fused_post_pre(
         )
         if execution_tokens is None:
             return None
+    if moe_quant_outputs is not None and execution_tokens != tokens:
+        return None
     attn_out = attn_out.view(tokens, 5120)
     residual = residual.view(tokens, 4, 5120)
     post = post.view(tokens, 4, 1)
@@ -323,6 +328,8 @@ def try_fused_post_pre(
         )
         if quantized is not None:
             arguments.update(y_fp8=q, y_gemm_sf=sf)
+        if moe_quant_outputs is not None:
+            arguments.update(moe_quant_outputs)
         operation(**arguments)
         if quantized is not None:
             quantized = (q[:tokens].view(*leading, 5120), sf[:tokens])

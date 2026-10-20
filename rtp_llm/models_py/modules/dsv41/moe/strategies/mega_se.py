@@ -453,11 +453,43 @@ class MegaMoEStrategySE(MegaMoEStrategy):
             **self._shared_recipe_kwargs,
         )
 
-    def forward(self, x, weights, indices):
+    def prepare_mhc_quant_outputs(self, tokens):
+        if (
+            tokens <= 0 or tokens > self.cfg.max_tokens_per_rank
+            or self._input_packer.name != "fused"
+            or os.environ.get("DSV4_MEGA_MOE_INPUT_PACKER_IMPL", "optimized") != "optimized"
+        ):
+            return None
+        buf = self._mega_buf
+        q, sf = buf.x[:tokens], buf.x_sf[:tokens]
+        shared = buf.shared_l1_acts_sf[:tokens]
+        block_m = self._block_m(tokens)
+        active_rows = ((tokens + block_m - 1) // block_m) * ((block_m + 127) // 128 * 128)
+        if (
+            q.dtype != torch.float8_e4m3fn or sf.dtype != torch.int32
+            or not q.is_contiguous() or not sf.is_contiguous()
+            or shared.dtype != torch.int32 or shared.stride(0) != 1
+            or shared.stride(1) < active_rows
+        ):
+            return None
+        return dict(y_fp8=q, y_routed_sf=sf, y_shared_sf=shared, shared_sf_block_m=block_m)
+
+    def forward(self, x, weights, indices, *, _prepacked=False):
         """Return BF16 routed+shared output; participate even for local T=0."""
         tokens = x.size(0)
         block_m = self._block_m(tokens)
-        self._input_packer.pack(x, weights, indices, self._mega_buf, tokens, block_m)
+        if _prepacked:
+            buf = self._mega_buf
+            if weights.data_ptr() != buf.topk_weights.data_ptr():
+                buf.topk_weights[:tokens].copy_(weights)
+            if indices.data_ptr() != buf.topk_idx.data_ptr():
+                buf.topk_idx[:tokens].copy_(indices)
+            from .._mega_se_input_pack_triton import stage_mega_moe_se_shared_l1_scales
+
+            # Native MHC writes real SF rows; RTP also clears all active holes.
+            stage_mega_moe_se_shared_l1_scales(buf.x_sf[:tokens], buf.shared_l1_acts_sf, tokens, block_m)
+        else:
+            self._input_packer.pack(x, weights, indices, self._mega_buf, tokens, block_m)
         y = self._mega_y[:tokens]
         self._launch(y, tokens, x.device)
         return y

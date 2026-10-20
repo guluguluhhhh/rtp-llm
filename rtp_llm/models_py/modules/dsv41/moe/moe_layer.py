@@ -277,12 +277,39 @@ class MoE(nn.Module):
     def _use_gate_pack(self) -> bool:
         return self._gate_pack_static and (not self._has_visual_tokens)
 
-    def _forward_gate_pack(self, x: torch.Tensor, input_ids: torch.Tensor):
+    def mhc_quant_outputs(self, hidden):
+        from .mega_gate import can_use_mega_gate
+
+        prepare = getattr(type(self._strategy), "prepare_mhc_quant_outputs", None)
+        hooks = nn.modules.module
+        if (
+            os.environ.get("DSV41_MHC_MOE_FP8", "1") != "1"
+            or not self._routed_includes_shared or not self._use_gate_pack()
+            or prepare is None or not hidden.is_contiguous()
+            or self._forward_pre_hooks or self._forward_hooks
+            or self._strategy._forward_pre_hooks or self._strategy._forward_hooks
+            or getattr(hooks, "_global_forward_pre_hooks", None)
+            or getattr(hooks, "_global_forward_hooks", None)
+        ):
+            return None
+        x = hidden.view(-1, hidden.shape[-1])
+        return prepare(self._strategy, x.shape[0]) if can_use_mega_gate(x, self.gate) else None
+
+    def _forward_gate_pack(self, x: torch.Tensor, input_ids: torch.Tensor, *, prepacked=False):
         from .mega_gate import can_use_mega_gate, mega_gate
 
         if can_use_mega_gate(x, self.gate):
             with record_function_range("dsv4.moe.deepgemm_mega_gate"):
-                weights, indices = mega_gate(x, self.gate, self._strategy.cfg.ep_rank)
+                if prepacked:
+                    buf = self._strategy._mega_buf
+                    weights, indices = mega_gate(
+                        x, self.gate, self._strategy.cfg.ep_rank,
+                        out=(buf.topk_idx[: x.shape[0]], buf.topk_weights[: x.shape[0]]),
+                    )
+                else:
+                    weights, indices = mega_gate(x, self.gate, self._strategy.cfg.ep_rank)
+            if prepacked:
+                return self._strategy(x, weights, indices, _prepacked=True)
             return self._strategy(x, weights, indices)
         return self._strategy.forward_with_gate_pack(x, self.gate, input_ids)
 
@@ -385,6 +412,7 @@ class MoE(nn.Module):
         input_ids: torch.Tensor,
         *,
         routing_metadata: Optional[GateRoutingMetadata] = None,
+        _prepacked: bool = False,
     ) -> torch.Tensor:
         from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 
@@ -397,6 +425,10 @@ class MoE(nn.Module):
             if routing_metadata is not None
             else input_ids if input_ids.dim() == 1 else input_ids.flatten()
         )
+        if _prepacked and self._use_gate_pack() and self._routed_includes_shared and routing_metadata is None:
+            with record_function_range("dsv4.moe.routed_experts"):
+                y = self._forward_gate_pack(x, input_ids_flat, prepacked=True)
+            return y.view(shape)
         dbg_pos = getattr(_rt, "_DBG_GLOBAL_POS", -1)
         dbg_pos_mask = None
         dbg_pos_name = None
