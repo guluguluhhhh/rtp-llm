@@ -47,6 +47,11 @@ launch, and Python performs metadata-only admission before allocating outputs.
   every CTA triggers the next grid after cluster setup; the FlashMLA consumer
   initializes its barriers/TMEM, then waits before reading Q, indices or cache.
   See `3rdparty/flashmla/README.md` for the source pin and coherent-load patch.
+- Outgoing PDL enables programmatic incoming serialization on this launch too.
+  The producer therefore waits when `wait_pdl || trigger_pdl`, including when
+  the upstream Qnorm has no explicit trigger. The complete attention graph has
+  two programmatic edges (Qnorm→producer→FlashMLA); the isolated two-kernel
+  producer/consumer graph has one.
 
 FULL dispatch (M is B×S token rows, N36864):
 

@@ -282,6 +282,69 @@ class ReadyQKVCUDA(unittest.TestCase):
                             )
 
     @torch.inference_mode()
+    def test_outgoing_pdl_waits_for_non_pdl_query_norm(self):
+        from rtp_llm.models_py.modules.dsv41._v41_query_quant import query_norm_quant
+
+        for m in (128, 512):
+            with self.subTest(m=m):
+                case, plan, extra, swa_indices = self.case(
+                    m, metadata_dtype=torch.int32
+                )
+                latent = torch.randn(m, 1, 1280, device="cuda", dtype=torch.bfloat16)
+                norm_weight = torch.ones(1280, device="cuda", dtype=torch.bfloat16)
+
+                def pipeline():
+                    # This primary does not explicitly trigger dependents. The
+                    # fused launch's outgoing PDL attribute still creates a
+                    # programmatic incoming edge and requires a visibility wait.
+                    _, (data, scales) = query_norm_quant(
+                        latent, norm_weight, 1e-6, pdl=False
+                    )
+                    q, _, slots = self.fused((data, scales, *case[2:]), plan, True)
+                    return self.consumer(
+                        q, case[6], swa_indices, case[4], extra, slots, True
+                    )
+
+                pipeline()
+                torch.cuda.synchronize()
+                graph = torch.cuda.CUDAGraph(keep_graph=True)
+                with torch.cuda.graph(graph):
+                    actual = pipeline()
+                inspect = getattr(producer._ops(), "inspect_graph", None)
+                if inspect is not None:
+                    audit = inspect(graph.raw_cuda_graph())
+                    self.assertEqual(audit["node_count"], 3)
+                    self.assertEqual(sum(e["type"] == 1 for e in audit["edges"]), 2)
+                for phase in range(4):
+                    latent.normal_()
+                    case[2].normal_()
+                    case[4].add_(1)
+                    _, (data, scales) = query_norm_quant(latent, norm_weight, 1e-6)
+                    q, _, expected_pool, slots = self.oracle(
+                        (data, scales, *case[2:]), plan
+                    )
+                    expected = self.consumer(
+                        q, expected_pool, swa_indices, case[4], extra, slots, False
+                    )
+                    graph.replay()
+                    torch.cuda.synchronize()
+                    for value, target in zip(actual, expected):
+                        torch.testing.assert_close(
+                            (
+                                value.view(torch.uint8)
+                                if value.dtype == torch.float8_e4m3fn
+                                else value
+                            ),
+                            (
+                                target.view(torch.uint8)
+                                if target.dtype == torch.float8_e4m3fn
+                                else target
+                            ),
+                            rtol=0,
+                            atol=0,
+                        )
+
+    @torch.inference_mode()
     def test_unsupported_metadata_preserves_cache(self):
         case, plan, _, _ = self.case(128)
         original = case[6].clone()

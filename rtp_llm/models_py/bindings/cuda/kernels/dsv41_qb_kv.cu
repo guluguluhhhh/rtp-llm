@@ -164,7 +164,10 @@ static void qb_kv_impl(torch::Tensor x, torch::Tensor xs, torch::Tensor w, torch
         if ((index_entries & (index_entries - 1)) == 0) side.entries_shift = __builtin_ctz(unsigned(index_entries));
         side.table_stride = table.stride(0); side.local_stride = local.stride(0);
     }
-    side.wait_pdl = wait_pdl;
+    // Enabling outgoing PDL also puts this launch behind a programmatic
+    // incoming edge. Even without an explicit upstream trigger, primary exit
+    // alone does not guarantee global-memory visibility to this grid.
+    side.wait_pdl = wait_pdl || trigger_pdl;
     side.trap_invalid = trap_invalid;
     side.kv = reinterpret_cast<const __nv_bfloat16*>(kv.data_ptr());
     side.gamma = reinterpret_cast<const __nv_bfloat16*>(gamma.data_ptr());

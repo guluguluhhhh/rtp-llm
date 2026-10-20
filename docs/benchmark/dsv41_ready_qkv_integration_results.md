@@ -1,5 +1,9 @@
 # V4.1 REUSE Q/KV/index 3→1 + FlashMLA PDL 接入
 
+> 后续无 Bazel 的完整 attention 计算链验证、上游 PDL visibility 修复和目标分支
+> FlashMLA wheel 对照，见 [完整 attention 验证](dsv41_whole_attention_validation.md)。
+> 本文保留前一轮孤立 producer/consumer 的测量与当时的验收边界。
+
 2026-10-21。分支 `codex/dsv41-qkv-integration-review`，基于
 `guluguluhhhh/full_layer_optimize@801eb19c34c4616c8ed387aafada185f879e00b9`。
 
