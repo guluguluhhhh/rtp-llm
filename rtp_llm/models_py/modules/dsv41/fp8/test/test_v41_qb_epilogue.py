@@ -14,6 +14,67 @@ from rtp_llm.utils.model_weight import W
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class QBEpilogueTest(unittest.TestCase):
     @torch.inference_mode()
+    def test_reindex_projection_chain_reload_graph(self):
+        from rtp_llm.models_py.modules.dsv41.fp8 import _v41_front_gemm as front
+        from rtp_llm.models_py.modules.dsv41.fp8.decode.compute_qkv import decode_compute_qkv
+        from rtp_llm.models_py.modules.dsv41.test.test_v41_front_gemm import FrontGemmTest
+
+        with patch.dict(os.environ, {
+            "DSV41_FUSED_FRONT_PROJECTION": "1",
+            "DSV41_FUSED_QB_POSTPROCESS": "1",
+            "DSV41_FUSED_QUERY_QUANT": "1",
+            "DSV4_FP8_QUANT_KERNEL": "legacy",
+        }):
+            attn, state, owner = fixture()
+            projection = FrontGemmTest().make_attention()
+            for name in ("wq_a_wkv", "index_weights", "q_norm", "q_lora_rank", "eps"):
+                setattr(attn, name, getattr(projection, name))
+            attn.is_kv_source = False
+            attn.rope_head_dim, attn.head_dim = 64, 512
+            attn.skip_post_q_norm = True
+            attn.kv_norm = torch.ones(512, device="cuda", dtype=torch.bfloat16)
+            state.merged_qb = MergedQB.create(attn, state, owner)
+            front.prepare(attn)
+            x = torch.randn(64, 6, 5120, device="cuda", dtype=torch.bfloat16)
+            positions = torch.arange(384, device="cuda", dtype=torch.int32) % 128
+
+            def call():
+                return decode_compute_qkv(attn, x, positions, mega_attention=state)
+
+            stream = torch.cuda.Stream()
+            stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(stream):
+                for _ in range(3):
+                    call()
+            stream.synchronize()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=stream):
+                captured = call()
+            self.assertIsNotNone(captured.head_weights)
+            self.assertIsNotNone(captured.index_prepared)
+            self.assertIsNone(captured.index_q)
+            pointers = [t.data_ptr() for t in attn._front_weights.tensors]
+            for _ in range(3):
+                torch.cuda.synchronize()
+                attn.index_weights = -attn.index_weights
+                attn.wq_a_wkv.weight = (-attn.wq_a_wkv.weight.float()).to(torch.float8_e4m3fn)
+                attn.wq_b.weight.copy_((-attn.wq_b.weight.float()).to(torch.float8_e4m3fn))
+                owner[W.v4_indexer_wq_b_w].copy_(
+                    (-owner[W.v4_indexer_wq_b_w].float()).to(torch.float8_e4m3fn)
+                )
+                state.reload_weights(attn)
+                front.prepare(attn)
+                x.normal_()
+                positions.add_(1)
+                graph.replay()
+                expected = call()
+                for name in ("q", "qr", "kv", "head_weights"):
+                    torch.testing.assert_close(getattr(captured, name), getattr(expected, name), atol=0, rtol=0)
+                for actual, reference in zip(captured.index_prepared, expected.index_prepared):
+                    self.assertTrue(torch.equal(actual.view(torch.uint8), reference.view(torch.uint8)))
+                self.assertEqual(pointers, [t.data_ptr() for t in attn._front_weights.tensors])
+
+    @torch.inference_mode()
     def test_prepared_consumers_and_fallback(self):
         from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import AttentionV41FP8
         from rtp_llm.models_py.modules.dsv41.fp8.test.test_v41_decode_attention_fusion import _fixture

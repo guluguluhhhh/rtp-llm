@@ -82,7 +82,6 @@ def decode_compute_qkv(
     mega_attention=None,
     shared_input_quant=None,
     qb_pdl: bool = False,
-    fuse_head_weights: bool = True,
 ) -> DecodeQKV:
     """Decode Q/KV path — RMSNorm + LoRA Q + KV linear + fused RMSNorm-RoPE.
 
@@ -100,12 +99,14 @@ def decode_compute_qkv(
         try_project_quantized_qkv,
     )
 
-    from rtp_llm.models_py.modules.dsv41.fp8._v41_front_gemm import project
+    from rtp_llm.models_py.modules.dsv41.fp8._v41_front_gemm import is_reindex, project
 
-    # FULL overlap already computes head weights on its auxiliary stream.
+    # Restrict our fusions to Reindex, including when FULL overlap is disabled
+    # or falls back. FULL keeps its original projection and PDL consumer.
+    reindex = is_reindex(attn)
     front = (
         project(attn, x, quantized_input=shared_input_quant, pdl=qb_pdl)
-        if fuse_head_weights
+        if reindex
         else None
     )
     head_weights = None if front is None else front[3]
@@ -140,7 +141,7 @@ def decode_compute_qkv(
                 )
                 # The custom consumer does not opt into PDL. Preserve the
                 # official wait-enabled DeepGEMM consumer for a PDL producer.
-                if rd == 64 and not qb_pdl else None
+                if reindex and rd == 64 and not qb_pdl else None
             )
             if prepared is None:
                 q, index_q = merged.forward_quantized(*qr_quantized)
