@@ -29,6 +29,7 @@ _TESTS = [
     "test_mega_gate",
     "test_mega_input_pack",
     "test_mega_se_input_pack",
+    "test_mhc_moe_inputs",
     "test_mhc_lazy_backward",
     "test_prefill_workspace",
     "test_strategy_select",
@@ -78,7 +79,7 @@ _TESTS = [
         }),
         legacy_create_init = 0,
     )
-    for name in _TESTS if name not in ["test_v41_mega_mhc"]
+    for name in _TESTS if name not in ["test_v41_mega_mhc", "test_mhc_moe_inputs"]
 ]
 
 py_test(
@@ -111,5 +112,5 @@ py_test(
         tags = ["dsv41_cuda13"],
         legacy_create_init = 0,
     )
-    for name in ["test_v41_mega_mhc"]
+    for name in ["test_v41_mega_mhc", "test_mhc_moe_inputs"]
 ]

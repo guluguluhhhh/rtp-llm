@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Dict, Optional
+from typing import TYPE_CHECKING, Dict, Optional
 
 import torch
 import torch.nn as nn
@@ -40,6 +40,9 @@ from .shared_expert import (
     get_shared_expert_executor,
 )
 from .strategies.base import MoeCfg, _resolve_forced, select_strategy
+
+if TYPE_CHECKING:
+    from .mega_se_input_packer import MegaMoEInputs
 
 _FINAL_OUT_CACHE: dict[tuple, torch.Tensor] = {}
 _CHUNKED_MOE_LOGGED = False
@@ -277,39 +280,34 @@ class MoE(nn.Module):
     def _use_gate_pack(self) -> bool:
         return self._gate_pack_static and (not self._has_visual_tokens)
 
-    def mhc_quant_outputs(self, hidden):
-        from .mega_gate import can_use_mega_gate
+    def prepare_mhc_inputs(self, x: torch.Tensor) -> MegaMoEInputs | None:
+        """Request direct FP8 output only for the existing native decode route.
 
-        prepare = getattr(type(self._strategy), "prepare_mhc_quant_outputs", None)
-        hooks = nn.modules.module
+        Requires group-32 Mega-SE and the native BF16 gate.
+        """
+        from .mega_gate import can_use_mega_gate
+        from .strategies.mega_se import MegaMoEStrategySE
+
         if (
-            os.environ.get("DSV41_MHC_MOE_FP8", "1") != "1"
-            or not self._routed_includes_shared or not self._use_gate_pack()
-            or prepare is None or not hidden.is_contiguous()
-            or self._forward_pre_hooks or self._forward_hooks
-            or self._strategy._forward_pre_hooks or self._strategy._forward_hooks
-            or getattr(hooks, "_global_forward_pre_hooks", None)
-            or getattr(hooks, "_global_forward_hooks", None)
+            not self._is_decode_role
+            or not self._use_gate_pack()
+            or type(self._strategy) is not MegaMoEStrategySE
+            or x.ndim not in (2, 3)
+            or x.shape[-1] != self.dim
+            or not x.is_contiguous()
         ):
             return None
-        x = hidden.view(-1, hidden.shape[-1])
-        return prepare(self._strategy, x.shape[0]) if can_use_mega_gate(x, self.gate) else None
+        x = x.view(-1, self.dim)
+        if not can_use_mega_gate(x, self.gate):
+            return None
+        return self._strategy.prepare_mhc_inputs(x)
 
-    def _forward_gate_pack(self, x: torch.Tensor, input_ids: torch.Tensor, *, prepacked=False):
+    def _forward_gate_pack(self, x: torch.Tensor, input_ids: torch.Tensor):
         from .mega_gate import can_use_mega_gate, mega_gate
 
         if can_use_mega_gate(x, self.gate):
             with record_function_range("dsv4.moe.deepgemm_mega_gate"):
-                if prepacked:
-                    buf = self._strategy._mega_buf
-                    weights, indices = mega_gate(
-                        x, self.gate, self._strategy.cfg.ep_rank,
-                        out=(buf.topk_idx[: x.shape[0]], buf.topk_weights[: x.shape[0]]),
-                    )
-                else:
-                    weights, indices = mega_gate(x, self.gate, self._strategy.cfg.ep_rank)
-            if prepacked:
-                return self._strategy(x, weights, indices, _prepacked=True)
+                weights, indices = mega_gate(x, self.gate, self._strategy.cfg.ep_rank)
             return self._strategy(x, weights, indices)
         return self._strategy.forward_with_gate_pack(x, self.gate, input_ids)
 
@@ -412,7 +410,7 @@ class MoE(nn.Module):
         input_ids: torch.Tensor,
         *,
         routing_metadata: Optional[GateRoutingMetadata] = None,
-        _prepacked: bool = False,
+        mhc_inputs: MegaMoEInputs | None = None,
     ) -> torch.Tensor:
         from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 
@@ -420,15 +418,19 @@ class MoE(nn.Module):
         shape = x.size()
         if x.dim() != 2 or x.size(1) != self.dim:
             x = x.view(-1, self.dim)
+        if mhc_inputs is not None:
+            # The block passes this only after a successful MegaMHC write.
+            # No allocation, activation pack, or shared-scale staging here.
+            if routing_metadata is not None or _dbg:
+                raise ValueError("Prepared MegaMHC inputs require plain decode routing")
+            with record_function_range("dsv4.moe.routed_experts"):
+                y = self._strategy.forward_from_mhc(x, self.gate, mhc_inputs)
+            return y.view(shape)
         input_ids_flat = (
             routing_metadata.input_ids
             if routing_metadata is not None
             else input_ids if input_ids.dim() == 1 else input_ids.flatten()
         )
-        if _prepacked and self._use_gate_pack() and self._routed_includes_shared and routing_metadata is None:
-            with record_function_range("dsv4.moe.routed_experts"):
-                y = self._forward_gate_pack(x, input_ids_flat, prepacked=True)
-            return y.view(shape)
         dbg_pos = getattr(_rt, "_DBG_GLOBAL_POS", -1)
         dbg_pos_mask = None
         dbg_pos_name = None

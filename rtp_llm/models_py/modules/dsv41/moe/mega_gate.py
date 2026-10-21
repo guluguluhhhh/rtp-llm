@@ -72,13 +72,17 @@ def can_use_mega_gate(x: torch.Tensor, gate) -> bool:
 
 
 def mega_gate(x: torch.Tensor, gate, ep_rank: int = 0, *, out=None):
-    """Return (weights, global expert IDs), with PyTorch-owned graph storage."""
+    """Return (weights, global IDs); optional ``out`` is (IDs, weights)."""
     kernel = _native_gate()
     if kernel is None:
         raise RuntimeError("DeepGEMM does not provide bf16_mega_gate")
     if out is None:
-        indices = torch.empty((x.shape[0], gate.topk), dtype=torch.int64, device=x.device)
-        weights = torch.empty((x.shape[0], gate.topk), dtype=torch.float32, device=x.device)
+        indices = torch.empty(
+            (x.shape[0], gate.topk), dtype=torch.int64, device=x.device
+        )
+        weights = torch.empty(
+            (x.shape[0], gate.topk), dtype=torch.float32, device=x.device
+        )
     else:
         indices, weights = out
     kernel(

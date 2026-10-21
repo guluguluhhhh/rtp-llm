@@ -27,7 +27,7 @@ from ..mega_se_buf import (
     _mega_moe_se_enabled,
     mega_moe_se_shared_recipe_kwargs,
 )
-from ..mega_se_input_packer import get_mega_moe_se_input_packer
+from ..mega_se_input_packer import MegaMoEInputs, get_mega_moe_se_input_packer
 from ..mega_se_jit_warmup import (
     clamp_token_counts,
     format_token_counts,
@@ -453,45 +453,61 @@ class MegaMoEStrategySE(MegaMoEStrategy):
             **self._shared_recipe_kwargs,
         )
 
-    def prepare_mhc_quant_outputs(self, tokens):
-        if (
-            tokens <= 0 or tokens > self.cfg.max_tokens_per_rank
-            or self._input_packer.name != "fused"
-            or os.environ.get("DSV4_MEGA_MOE_INPUT_PACKER_IMPL", "optimized") != "optimized"
-        ):
-            return None
-        buf = self._mega_buf
-        q, sf = buf.x[:tokens], buf.x_sf[:tokens]
-        shared = buf.shared_l1_acts_sf[:tokens]
-        block_m = self._block_m(tokens)
-        active_rows = ((tokens + block_m - 1) // block_m) * ((block_m + 127) // 128 * 128)
-        if (
-            q.dtype != torch.float8_e4m3fn or sf.dtype != torch.int32
-            or not q.is_contiguous() or not sf.is_contiguous()
-            or shared.dtype != torch.int32 or shared.stride(0) != 1
-            or shared.stride(1) < active_rows
-        ):
-            return None
-        return dict(y_fp8=q, y_routed_sf=sf, y_shared_sf=shared, shared_sf_block_m=block_m)
-
-    def forward(self, x, weights, indices, *, _prepacked=False):
+    def forward(self, x, weights, indices):
         """Return BF16 routed+shared output; participate even for local T=0."""
         tokens = x.size(0)
         block_m = self._block_m(tokens)
-        if _prepacked:
-            buf = self._mega_buf
-            if weights.data_ptr() != buf.topk_weights.data_ptr():
-                buf.topk_weights[:tokens].copy_(weights)
-            if indices.data_ptr() != buf.topk_idx.data_ptr():
-                buf.topk_idx[:tokens].copy_(indices)
-            from .._mega_se_input_pack_triton import stage_mega_moe_se_shared_l1_scales
-
-            # Native MHC writes real SF rows; RTP also clears all active holes.
-            stage_mega_moe_se_shared_l1_scales(buf.x_sf[:tokens], buf.shared_l1_acts_sf, tokens, block_m)
-        else:
-            self._input_packer.pack(x, weights, indices, self._mega_buf, tokens, block_m)
+        self._input_packer.pack(x, weights, indices, self._mega_buf, tokens, block_m)
         y = self._mega_y[:tokens]
         self._launch(y, tokens, x.device)
+        return y
+
+    def prepare_mhc_inputs(self, x: torch.Tensor) -> MegaMoEInputs | None:
+        """Expose native group-32 decode destinations without writing them."""
+        buf = self._mega_buf
+        if (
+            not self.cfg.is_decode_role
+            or self.cfg.shared_fp8_block_size != 32
+            or self.cfg.dim != 5120
+            or x.ndim != 2
+            or x.shape[1] != self.cfg.dim
+            or x.dtype != torch.bfloat16
+            or not x.is_contiguous()
+            or x.device != buf.x.device
+            or not 0 < x.shape[0] <= buf.num_max_tokens_per_rank
+        ):
+            return None
+        tokens = x.shape[0]
+        return MegaMoEInputs(
+            owner=self,
+            x=buf.x[:tokens],
+            x_sf=buf.x_sf[:tokens],
+            shared_l1_acts_sf=buf.shared_l1_acts_sf[:tokens],
+            topk_idx=buf.topk_idx[:tokens],
+            topk_weights=buf.topk_weights[:tokens],
+            block_m=self._block_m(tokens),
+        )
+
+    def forward_from_mhc(self, x: torch.Tensor, gate, inputs: MegaMoEInputs):
+        """Route BF16 and consume the FP8/SF already written by MegaMHC."""
+        from ..mega_gate import mega_gate
+
+        if (
+            inputs.owner is not self
+            or x.shape != inputs.x.shape
+            or x.device != inputs.x.device
+            or x.dtype != torch.bfloat16
+        ):
+            raise ValueError("MegaMHC inputs must belong to this MoE invocation")
+        with record_function_range("dsv4.moe.deepgemm_mega_gate"):
+            mega_gate(
+                x,
+                gate,
+                self.cfg.ep_rank,
+                out=(inputs.topk_idx, inputs.topk_weights),
+            )
+        y = self._mega_y[: x.shape[0]]
+        self._launch(y, x.shape[0], x.device)
         return y
 
     def forward_with_gate_pack(self, x, gate, input_ids):

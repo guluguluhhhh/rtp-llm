@@ -83,6 +83,11 @@ _PRODUCE_GLOBAL_TILE_ROWS = 32768
 _SMALL_CP_X_GATHER_MAX_ROWS = int(
     os.environ.get("DSV41_SMALL_CP_X_GATHER_MAX_ROWS", "131072")
 )
+# Fixed-shape engine A/B: 96-128 MiB saved at B16 did not help, while
+# 192-256 MiB at B32 did. Apply that crossover to actual transfer bytes.
+_LOCAL_PROJECT_MIN_SAVED_BYTES = (
+    int(os.environ.get("DSV41_LOCAL_PROJECT_MIN_SAVED_MB", "160")) * 1024**2
+)
 # Serial groups retain at most one BF16 gather + restore (1280 MiB for
 # hidden=5120), plus three group-sized int64 index temporaries (1.5 MiB).
 _CP_X_GROUP_MAX_ROWS = 65536
@@ -96,6 +101,30 @@ def _use_small_cp_x_gather(cp_ctx) -> bool:
     if lengths is None or len(lengths) <= 1:
         limit = min(limit, 65536)
     return cp_ctx.padded_seq_len <= limit
+
+
+def _project_before_small_cp_gather(x, cp_ctx, output_width) -> bool:
+    """Select local projection when it saves enough collective traffic.
+
+    The same projection also replaces a global-row GEMM with a local-row GEMM.
+    A small transfer saving does not repay the extra pre-gather launch and its
+    lost overlap with SWA work, so retain raw gather below that crossover.
+    """
+    if (
+        cp_ctx.cp_size <= 1
+        or x.ndim != 2
+        or x.dtype != torch.bfloat16
+        or not x.is_contiguous()
+        or x.shape[0] != cp_ctx.chunk_length
+        or cp_ctx.padded_seq_len != cp_ctx.cp_size * x.shape[0]
+    ):
+        return False
+    rows = cp_ctx.padded_seq_len
+    raw_bytes = rows * x.shape[1] * x.element_size()
+    projected_bytes = rows * output_width * torch.float32.itemsize
+    return projected_bytes < raw_bytes and (
+        raw_bytes - projected_bytes >= _LOCAL_PROJECT_MIN_SAVED_BYTES
+    )
 
 
 def _prefill_x_group_plan(x, cp_ctx):
@@ -1268,6 +1297,7 @@ class AttentionV41FP8(AttentionFP8):
         *,
         prefill,
         projected_tiles=None,
+        projected_full=False,
         raw_tiles=None,
         grouped_projection=False,
         batched_groups=False,
@@ -1470,14 +1500,14 @@ class AttentionV41FP8(AttentionFP8):
             req_tile = req_ids[t0:t1]
             values = (
                 x_tile[:, : self.head_dim]
-                if projected_tiles is not None
+                if projected_tiles is not None or projected_full
                 else _linear_bf16_bf16_fp32(x_tile, owner.global_wkv)
             )
             scores = None
             if ratio == 2:
                 scores = (
                     x_tile[:, self.head_dim :]
-                    if projected_tiles is not None
+                    if projected_tiles is not None or projected_full
                     else _linear_bf16_bf16_fp32(x_tile, owner.global_wgate)
                 )
             group_plan = None
@@ -2468,6 +2498,7 @@ class AttentionV41FP8(AttentionFP8):
         # It overlaps SWA work; subsequent transfers overlap global projection.
         x_gather = None
         small_cp = common.cp_on and _use_small_cp_x_gather(common.cp_ctx)
+        projected_small_cp = False
         x_groups = (
             _prefill_x_group_plan(x, common.cp_ctx)
             if self.is_kv_source and common.cp_on and not small_cp
@@ -2478,6 +2509,25 @@ class AttentionV41FP8(AttentionFP8):
                 # One bounded all-gather avoids per-half launches on short requests.
                 first_tile = (None, 0, common.cp_ctx.padded_seq_len)
                 weights = ()
+                projected_small_cp = self.compress_ratio in (
+                    1,
+                    2,
+                ) and _project_before_small_cp_gather(
+                    x, common.cp_ctx, self.compress_ratio * self.head_dim
+                )
+                if projected_small_cp:
+                    from rtp_llm.models_py.modules.dsv41.fp8.compressor import (
+                        _linear_bf16_bf16_fp32,
+                    )
+
+                    owner = self._owner()
+                    weight = (
+                        torch.cat((owner.global_wkv, owner.global_wgate), dim=0)
+                        if self.compress_ratio == 2
+                        else owner.global_wkv
+                    )
+                    with record_function_range("dsv41.prefill.project_local_before_ag"):
+                        x = _linear_bf16_bf16_fp32(x, weight)
                 x_buffers = [x.new_empty((first_tile[2], x.shape[-1]))]
             else:
                 owner = self._owner()
@@ -2606,6 +2656,7 @@ class AttentionV41FP8(AttentionFP8):
                     lengths,
                     prefill=True,
                     projected_tiles=projected_tiles,
+                    projected_full=projected_small_cp,
                     raw_tiles=raw_tiles,
                     grouped_projection=x_groups is not None,
                     batched_groups=batched_groups,
@@ -2834,9 +2885,118 @@ class AttentionV41FP8(AttentionFP8):
         )
         self._shared_attention["global"] = {self.layer_id: keys}
 
+    def _prepare_indexer_query_decode(
+        self,
+        x,
+        qr,
+        positions,
+        qr_quantized=None,
+        index_q=None,
+        head_weights=None,
+        index_prepared=None,
+        *,
+        overlap=None,
+    ):
+        """Prepare query-only work before waiting for the current layer's keys."""
+        if not self.is_index_source:
+            return None
+        from rtp_llm.models_py.modules.dsv41.fp8 import (
+            _v41_decode_indexer as decode_indexer,
+        )
+        from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
+
+        B, S, _ = x.shape
+        T = B * S
+        keys = self._shared_attention["global"][self.kv_source_layer_id]
+        paged = isinstance(keys, decode_indexer.DecodeIndexerKeys) and (
+            decode_indexer.is_supported(
+                x.device, keys.pool.shape[1], self.index_n_heads, self.index_head_dim
+            )
+        )
+        if index_prepared is not None and paged:
+            # Our QB epilogue already produced RoPE/FP4 and scaled weights.
+            # Keep the upstream query contract without repeating those kernels.
+            if overlap is not None:
+                overlap.wait_indexer()
+                weights = overlap.weights
+            else:
+                weights = (
+                    F.linear(x.reshape(T, -1), self.index_weights)
+                    if head_weights is None else head_weights
+                )
+            return None, weights, index_prepared
+        if index_q is None and paged and self.rope_head_dim == 64 and overlap is None:
+            from rtp_llm.models_py.modules.dsv41._v41_query_quant import (
+                try_project_indexer_q,
+            )
+
+            pair = try_project_indexer_q(
+                self.index_wq, qr, self.freqs_cis, positions, qr_quantized
+            )
+            if pair is not None:
+                weights = (
+                    F.linear(x.reshape(T, -1), self.index_weights)
+                    if head_weights is None else head_weights
+                )
+                scaled = torch.empty_like(weights, dtype=torch.bfloat16)
+                torch.mul(
+                    weights,
+                    (self.index_head_dim * self.index_n_heads) ** -0.5,
+                    out=scaled,
+                )
+                payload, scales = pair
+                return (
+                    None,
+                    weights,
+                    (
+                        payload.view(
+                            B, S, self.index_n_heads, self.index_head_dim // 2
+                        ),
+                        scales.view(B, S, self.index_n_heads),
+                        scaled.view(B, S, self.index_n_heads),
+                    ),
+                )
+        if index_q is None:
+            index_q = (
+                self.index_wq.forward_quantized(*qr_quantized)
+                if qr_quantized is not None
+                and isinstance(self.index_wq, V41MXFP8Linear)
+                else self._lin(self.index_wq, qr.reshape(T, -1))
+            )
+        q = index_q.view(T, self.index_n_heads, self.index_head_dim)
+        if overlap is not None:
+            overlap.wait_indexer()
+            weights = overlap.weights
+        else:
+            weights = (
+                F.linear(x.reshape(T, -1), self.index_weights)
+                if head_weights is None else head_weights
+            )
+        prepared = None
+        if paged:
+            prepared = decode_indexer.prepare_indexer_q_and_weights(
+                q.view(B, S, self.index_n_heads, self.index_head_dim),
+                weights.view(B, S, self.index_n_heads),
+                self.freqs_cis,
+                positions.reshape(T),
+                self.rope_head_dim,
+                weights_out_dtype=torch.bfloat16,
+            )
+        return q, weights, prepared
+
     def _select_indices_decode(
-        self, x, qr, positions, qr_quantized=None, index_q=None, head_weights=None,
-        index_prepared=None, *, overlap=None, slot_plan=None
+        self,
+        x,
+        qr,
+        positions,
+        qr_quantized=None,
+        index_q=None,
+        head_weights=None,
+        index_prepared=None,
+        *,
+        prepared_query=None,
+        overlap=None,
+        slot_plan=None,
     ):
         """Capture-static index scoring with device-side causal/candidate masks."""
         shared = self._shared_attention
@@ -2852,32 +3012,14 @@ class AttentionV41FP8(AttentionFP8):
 
         paged = isinstance(keys, decode_indexer.DecodeIndexerKeys)
         capacity = keys.capacity if paged else keys.shape[1]
-        flat = x.reshape(T, -1)
-        from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
-
-        # Prepared FP4 queries are only consumed by supported paged scorers.
-        # A non-paged/backend fallback recomputes BF16 Indexer Q on demand.
-        if index_prepared is not None and not (
-            paged and decode_indexer.is_supported(
-                x.device, keys.pool.shape[1], self.index_n_heads, self.index_head_dim
+        if prepared_query is None:
+            prepared_query = AttentionV41FP8._prepare_indexer_query_decode(
+                self, x, qr, positions, qr_quantized, index_q,
+                head_weights, index_prepared, overlap=overlap,
             )
-        ):
-            index_prepared = None
-        if index_q is None and index_prepared is None:
-            index_q = (
-                self.index_wq.forward_quantized(*qr_quantized)
-                if qr_quantized is not None
-                and isinstance(self.index_wq, V41MXFP8Linear)
-                else self._lin(self.index_wq, qr.reshape(T, -1))
-            )
-        q = None if index_q is None else index_q.view(B, S, self.index_n_heads, self.index_head_dim)
-        if overlap is not None:
-            overlap.wait_indexer()
-        weights = (
-            overlap.weights if overlap is not None else (
-                F.linear(flat, self.index_weights) if head_weights is None else head_weights
-            )
-        )
+        q, weights, prepared = prepared_query
+        if q is not None:
+            q = q.view(B, S, self.index_n_heads, self.index_head_dim)
         indexer_metadata = None if overlap is None else overlap.metadata
         if (
             overlap is None
@@ -2942,7 +3084,7 @@ class AttentionV41FP8(AttentionFP8):
                         keys.pool,
                         plan,
                         rope_head_dim=self.rope_head_dim,
-                        prepared=index_prepared,
+                        prepared_query=prepared,
                     )
                 shared["topk"] = {self.layer_id: output}
                 return output
@@ -2953,16 +3095,6 @@ class AttentionV41FP8(AttentionFP8):
             else (positions + 1) // self.compress_ratio
         )
         if paged:
-            prepared_q = index_prepared
-            if overlap is not None and prepared_q is None:
-                prepared_q = decode_indexer.prepare_indexer_q_and_weights(
-                    q.view(B, S, self.index_n_heads, self.index_head_dim),
-                    weights.view(B, S, self.index_n_heads),
-                    self.freqs_cis,
-                    positions.reshape(T),
-                    self.rope_head_dim,
-                    weights_out_dtype=torch.bfloat16,
-                )
             if overlap is not None:
                 overlap.wait_global()
             all_logits = decode_indexer.score_decode_indexer(
@@ -2979,7 +3111,7 @@ class AttentionV41FP8(AttentionFP8):
                 preserve_score_dtype=True,
                 pad_invisible=False,
                 metadata=indexer_metadata,
-                prepared_q=prepared_q,
+                prepared_query=prepared,
             )
         else:
             weights = (
@@ -3227,6 +3359,7 @@ class AttentionV41FP8(AttentionFP8):
         ready_plan = make_ready_plan(self, mega, metadata, T, swa_pool, mega_swa)
         swa_slots = metadata.pool_write_slot_mappings.get(SWA_KV)
         global_work = None
+        prepared_query = None
         if self.compress_ratio and self.is_kv_source:
             from rtp_llm.models_py.modules.dsv41.fp8.decode.global_overlap import (
                 start_global_decode,
@@ -3249,6 +3382,12 @@ class AttentionV41FP8(AttentionFP8):
             )
             if not qkv.swa_written:
                 self._decode_write_swa_fp8(qkv.kv, B, S, metadata)
+            if global_work is not None:
+                prepared_query = self._prepare_indexer_query_decode(
+                    x, qkv.qr, positions, qkv.qr_quantized, qkv.index_q,
+                    getattr(qkv, "head_weights", None),
+                    getattr(qkv, "index_prepared", None),
+                )
         finally:
             if global_work is not None:
                 global_work.finish()
@@ -3258,8 +3397,14 @@ class AttentionV41FP8(AttentionFP8):
                 if self.is_kv_source and global_work is None:
                     self._produce_global_decode(x, positions, req, starts)
                 selected = self._select_indices_decode(
-                    x, qkv.qr, positions, qkv.qr_quantized, qkv.index_q, qkv.head_weights,
-                    qkv.index_prepared
+                    x,
+                    qkv.qr,
+                    positions,
+                    qkv.qr_quantized,
+                    qkv.index_q,
+                    head_weights=qkv.head_weights,
+                    index_prepared=qkv.index_prepared,
+                    prepared_query=prepared_query,
                 )
                 slots = (
                     self._decode_global_slots(selected, metadata.req_id_per_token[:T])
@@ -3290,7 +3435,12 @@ class AttentionV41FP8(AttentionFP8):
             if self.is_kv_source and global_work is None:
                 self._produce_global_decode(x, positions, req, starts)
             selected = self._select_indices_decode(
-                x, qkv.qr, positions, qkv.qr_quantized, head_weights=qkv.head_weights
+                x,
+                qkv.qr,
+                positions,
+                qkv.qr_quantized,
+                head_weights=qkv.head_weights,
+                prepared_query=prepared_query,
             )
             from rtp_llm.models_py.modules.dsv41.fp8._v41_fp4_decode_attn import (
                 fp4_dual_decode_attention,
