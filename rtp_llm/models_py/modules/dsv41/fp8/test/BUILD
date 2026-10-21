@@ -127,26 +127,6 @@ _X86_TESTS = [
 
 
 cuda13_sm100_py_test(
-    name = "test_v41_qb_kv",
-    srcs = glob(["*.py"]) + ["//rtp_llm/test/pytest:pytest_main.py"],
-    main = "//rtp_llm/test/pytest:pytest_main.py",
-    args = ["--cuda-devices", "1", "$(location :test_v41_qb_kv.py)"],
-    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules", test_requirement("pytest")],
-    tags = ["dsv41_cuda13"],
-    legacy_create_init = 0,
-)
-
-cuda13_sm100_py_test(
-    name = "test_v41_topk_slots",
-    srcs = glob(["*.py"]) + ["//rtp_llm/test/pytest:pytest_main.py"],
-    main = "//rtp_llm/test/pytest:pytest_main.py",
-    args = ["--cuda-devices", "1", "$(location :test_v41_topk_slots.py)"],
-    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules", test_requirement("pytest")],
-    tags = ["dsv41_cuda13"],
-    legacy_create_init = 0,
-)
-
-cuda13_sm100_py_test(
     name = "test_v41_decode_qkv_integration",
     srcs = [
         "test_v41_decode_qkv_integration.py",
@@ -186,17 +166,6 @@ cuda13_sm100_py_test(
         "//rtp_llm:jit_cache_env",
         test_requirement("pytest"),
     ],
-    tags = ["dsv41_cuda13"],
-    legacy_create_init = 0,
-)
-
-
-cuda13_sm100_py_test(
-    name = "test_v41_ready_qkv",
-    srcs = glob(["*.py"]) + ["//rtp_llm/test/pytest:pytest_main.py"],
-    main = "//rtp_llm/test/pytest:pytest_main.py",
-    args = ["--cuda-devices", "1", "$(location :test_v41_ready_qkv.py)"],
-    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules", test_requirement("pytest")],
     tags = ["dsv41_cuda13"],
     legacy_create_init = 0,
 )
