@@ -1,5 +1,7 @@
 # V4.1 DSpark MTP preparation fusion
 
+Post-push revalidation of `bdb284c799` is recorded [here](dsv41_mtp_revalidation/README.md): 15 contract tests pass, 35 configurations are faster in both orders, 1,200 candidate tensor checks match bitwise, and all 4,200 replay envelopes pass Perfetto audit. Actual full-model import still fails against the installed older C++ ABI missing `HiddenStateCaptureDtype`; this remains subgraph validation. The original pre-push measurements below are retained.
+
 The proposal input preparation and non-CP commit row mapper launch several small integer kernels. This change combines proposal casts/noise/anchor/positions/mask in one Triton kernel and combines the commit upper-bound search, gathers, validity and output casts in another. Existing metadata and SWA-slot consumers remain unchanged. No GEMM, draft Transformer, head, or sampler is replaced.
 
 The local measurement source base is `438fbb2a0b8aa156b29184ee03daa774c64e7c25`. On the target device, PyTorch reports capability `(10,3)` and 148 SM. The following results use gamma=5, int32 ids; B denotes request count. Values are microseconds, forward / reverse measurement order:

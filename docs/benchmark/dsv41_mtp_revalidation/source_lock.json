@@ -1,0 +1,10 @@
+{
+  "commit": "bdb284c7999259cef5b5e6a6529152707adb385f",
+  "archive_sha256": "0215ab391d6a277213b3ddc15ac056ca5aa15f78f418fe7c6e96733d1b28e705",
+  "host": "sm103-0",
+  "container": "zzx-dsv41-fusion-gpu1-20261020",
+  "source_authority": "git archive from clean local pushed commit; no remote Git mutations",
+  "driver_sha256": "e3c0891a71aa6942da61125bef5f281c2ecc5d4f4d37d4fb4954845735eb78f8",
+  "remote_run_directory": "/work/integration_v15_bdb284c799_run2",
+  "preflight_retry": "First preflight required CUDA compiler PATH. Driver prepends /usr/local/cuda-13.2/bin; fresh run2 source snapshot used. No production source changes."
+}
