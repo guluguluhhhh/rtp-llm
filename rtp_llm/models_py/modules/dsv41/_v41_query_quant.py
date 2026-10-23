@@ -168,22 +168,12 @@ def _query_norm_quant_kernel(
     PDL: tl.constexpr = False,
     USE_PDL: tl.constexpr = False,
 ):
-    pdl_sync(USE_PDL)
-    if PDL:
-        # Producer only: QA completion still orders this kernel. The following
-        # QB may initialize early but must GDC-wait before reading Q/scales.
-        tl.inline_asm_elementwise(
-            "griddepcontrol.launch_dependents; // $0",
-            "=r",
-            [],
-            dtype=tl.int32,
-            is_pure=False,
-            pack=1,
-        )
     row = tl.program_id(0).to(tl.int64)
     cols = tl.arange(0, BLOCK)
-    x = tl.load(X + row * stride_x + cols, cols < D, 0).to(tl.float32)
+    # Model norm weights are immutable; only activations depend on QA.
     w = tl.load(W + cols, cols < D, 0).to(tl.float32)
+    pdl_sync(USE_PDL)
+    x = tl.load(X + row * stride_x + cols, cols < D, 0).to(tl.float32)
     inv = tl.rsqrt(tl.sum(x * x, 0) / D + EPS)
     # Match the existing strided norm's materialized BF16 boundary.
     y = (x * inv * w).to(tl.bfloat16)
@@ -198,6 +188,10 @@ def _query_norm_quant_kernel(
     quant = tl.div_rn(groups, scale[:, None])
     quant = tl.minimum(tl.maximum(quant, -448.0), 448.0)
     tl.store(Q + row * D + cols, tl.reshape(quant, (BLOCK,)), cols < D)
+    if USE_PDL or PDL:
+        # QB may initialize while scales are packed, but must wait before
+        # consuming Q/scales. PDL retains the explicit producer-only opt-in.
+        tl.extra.cuda.gdc_launch_dependents()
     group_ids = tl.arange(0, BLOCK // 32)
     exponent = tl.where(group_ids < D // 32, exponent, 0)
     packed = tl.sum(
@@ -211,7 +205,7 @@ def _query_norm_quant_kernel(
 def query_norm_quant(
     x: torch.Tensor, weight: torch.Tensor, eps: float, *, pdl: bool = False
 ):
-    """Return BF16 Q plus FP8 Q and packed MN-major UE8M0 scales."""
+    """Normalize with immutable model weights; return BF16 Q and FP8/UE8M0 Q."""
     flat = x.view(-1, x.shape[-1])
     rows, width = flat.shape
     normalized = torch.empty(x.shape, device=x.device, dtype=x.dtype)

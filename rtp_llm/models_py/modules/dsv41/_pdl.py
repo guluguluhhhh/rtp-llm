@@ -37,7 +37,8 @@ def launch_options(tensor: torch.Tensor) -> dict:
 @triton.jit
 def pdl_sync(USE_PDL: tl.constexpr):
     if USE_PDL:
-        # Every opted-in consumer waits before accessing global memory.
+        # Wait before reading predecessor outputs. Qualified kernels may
+        # preload immutable weights before this point.
         # Match DeepInfer's default: signal on kernel exit. Early signaling is
         # reserved for producers with an explicitly qualified overlap window.
         tl.extra.cuda.gdc_wait()
