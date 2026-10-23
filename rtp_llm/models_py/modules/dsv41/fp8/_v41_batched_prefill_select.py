@@ -6,6 +6,8 @@ from bisect import bisect_left
 
 import torch
 
+from rtp_llm.models_py.modules.dsv41._pdl import launch_options
+
 
 def _try_publish_with_tokens(
     shared, logits, visible, rows, bounds, target, block, count
@@ -179,7 +181,12 @@ def try_select_batched(
             )
         if publishing and not published:
             _mask_tail_kernel[(logits.shape[0],)](
-                logits, visible, logits.shape[1], logits.stride(0), 256
+                logits,
+                visible,
+                logits.shape[1],
+                logits.stride(0),
+                256,
+                **launch_options(logits),
             )
             _apply_prefill_candidates(
                 shared,
@@ -198,7 +205,12 @@ def try_select_batched(
             # Native K512 consumes ends; torch.topk and publication read tails.
             if not publishing:
                 _mask_tail_kernel[(logits.shape[0],)](
-                    logits, visible, logits.shape[1], logits.stride(0), 256
+                    logits,
+                    visible,
+                    logits.shape[1],
+                    logits.stride(0),
+                    256,
+                    **launch_options(logits),
                 )
             scores, selected = logits.topk(count, dim=-1)
             selected = torch.where(scores.isfinite(), selected, -1).int()

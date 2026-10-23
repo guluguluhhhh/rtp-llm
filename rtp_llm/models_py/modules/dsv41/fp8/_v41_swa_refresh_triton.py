@@ -6,6 +6,9 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41._pdl import enabled as pdl_enabled
+from rtp_llm.models_py.modules.dsv41._pdl import pdl_sync
+
 _READY = {}
 _LOCK = threading.Lock()
 _BLOCK = 2048
@@ -13,8 +16,16 @@ _BLOCK = 2048
 
 @triton.jit(do_not_specialize=["WIDTH", "SOURCE_STRIDE", "BATCH"])
 def _copy_swa_rows(
-    source, output, layout, WIDTH, SOURCE_STRIDE, BATCH, BLOCK: tl.constexpr
+    source,
+    output,
+    layout,
+    WIDTH,
+    SOURCE_STRIDE,
+    BATCH,
+    BLOCK: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     tile = tl.program_id(0).to(tl.int64)
     # Host layout contains cumulative *live* tile counts. A compact grid avoids
     # B*max(length) masked CTAs for a batch with one long request and many tails.
@@ -48,7 +59,8 @@ def _copy_swa_rows(
 
 
 def _key(device):
-    return device.index if device.index is not None else torch.cuda.current_device()
+    index = device.index if device.index is not None else torch.cuda.current_device()
+    return index, pdl_enabled(device)
 
 
 def is_supported(source):
@@ -83,6 +95,7 @@ def copy_rows(source, output, layout, tiles):
         source.stride(0) // 4,
         layout.shape[0],
         _BLOCK,
+        pdl_enabled(source.device),
     )
 
 
@@ -92,7 +105,7 @@ def warmup(device):
     if device.type != "cuda" or torch.version.hip is not None:
         return False
     with torch.cuda.device(device), _LOCK:
-        key = torch.cuda.current_device()
+        key = _key(device)
         if key in _READY:
             return True
         if torch.cuda.is_current_stream_capturing():
@@ -105,8 +118,9 @@ def warmup(device):
         output = torch.empty_like(source)
         host = torch.tensor([[0, 0, 2, 1]], dtype=torch.int64, pin_memory=True)
         layout = host.to(device=device, non_blocking=True)
-        args = (source, output, layout, 17, 17, 1, _BLOCK)
-        kernel = _copy_swa_rows.warmup(*args, grid=(1, 1, 1), num_warps=4)
+        args = (source, output, layout, 17, 17, 1, _BLOCK, key[1])
+        options = {"launch_pdl": True} if key[1] else {}
+        kernel = _copy_swa_rows.warmup(*args, grid=(1, 1, 1), num_warps=4, **options)
         kernel[(1, 1, 1)](*args)
         torch.cuda.current_stream().synchronize()
         _READY[key] = kernel

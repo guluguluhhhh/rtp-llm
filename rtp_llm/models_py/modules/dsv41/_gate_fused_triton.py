@@ -21,6 +21,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41._pdl import launch_options, pdl_sync
+
 
 @triton.jit(do_not_specialize=["N"])
 def _v4_gate_sqrtsoftplus_topk_kernel(
@@ -35,6 +37,7 @@ def _v4_gate_sqrtsoftplus_topk_kernel(
     ROUTE_SCALE: tl.constexpr,
     BLOCK_E: tl.constexpr,  # >= E, power of 2
     BLOCK_K: tl.constexpr,  # >= K, power of 2
+    USE_PDL: tl.constexpr = False,
 ):
     """One program per token row.
 
@@ -44,6 +47,7 @@ def _v4_gate_sqrtsoftplus_topk_kernel(
       3. Find top-K of (s + bias), keeping s un-biased for the weight gather.
       4. Normalize weights by sum and scale.
     """
+    pdl_sync(USE_PDL)
     pid = tl.program_id(0).to(tl.int64)
     if pid >= N:
         return
@@ -141,5 +145,6 @@ def fused_sqrtsoftplus_gate(
         BLOCK_K=BLOCK_K,
         num_warps=4,
         num_stages=2,
+        **launch_options(scores),
     )
     return out_w, out_idx

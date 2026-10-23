@@ -13,6 +13,7 @@ def _mhc_sinkhorn_fwd(
     token_block_size: int,
     repeat: int,
     eps: float,
+    enable_pdl: bool = False,
 ) -> tilelang.JITKernel:
     num_tokens = T.dynamic("num_tokens")
 
@@ -22,6 +23,8 @@ def _mhc_sinkhorn_fwd(
         comb_res_mix_out: T.Tensor[(num_tokens, hidden_size, hidden_size), T.float32],
     ) -> None:
         with T.Kernel(T.ceildiv(num_tokens, token_block_size)) as pid_x:
+            if enable_pdl:
+                T.pdl_sync()
             comb_frag = T.alloc_fragment(
                 (token_block_size, hidden_size, hidden_size), T.float32
             )

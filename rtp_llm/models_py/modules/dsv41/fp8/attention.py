@@ -36,6 +36,7 @@ from rtp_llm.models_py.modules.dsv41._fused_rmsnorm_fp8_quant_triton import (
 from rtp_llm.models_py.modules.dsv41._fused_rmsnorm_rope_triton import (
     fused_rmsnorm_rope,
 )
+from rtp_llm.models_py.modules.dsv41._pdl import enabled as pdl_enabled
 from rtp_llm.models_py.modules.dsv41._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv41.attn_type import SWA_KV
 from rtp_llm.models_py.modules.dsv41.chunk_env import (
@@ -2129,6 +2130,7 @@ class AttentionFP8(nn.Module):
                 cmp_local_raw.reshape(T, K_cmp),
                 entries_per_block=self._pool_entries_per_block(cmp_attn_type),
                 tokens_per_block_for_block_table=cmp_tokens_per_block,
+                enable_pdl=pdl_enabled(req_id.device),
             )
         swa_topk_3d = swa_global.view(bsz, q_len, win).contiguous()
         cmp_topk_3d = cmp_global.view(bsz, q_len, K_cmp).contiguous()

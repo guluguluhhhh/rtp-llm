@@ -4,6 +4,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41._pdl import launch_options, pdl_sync
+
 
 @triton.jit
 def _normalize(
@@ -16,7 +18,9 @@ def _normalize(
     source_stride: tl.constexpr,
     relative: tl.constexpr,
     BLOCK: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     row = tl.program_id(0)
     col = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
     begin = tl.load(starts + row)
@@ -49,5 +53,6 @@ def normalize_mqa_logits(scores, starts, ends, width, *, relative):
             scores.stride(0),
             relative,
             512,
+            **launch_options(scores),
         )
     return output

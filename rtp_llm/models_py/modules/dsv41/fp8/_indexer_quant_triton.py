@@ -41,6 +41,7 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41._pdl import launch_options, pdl_sync
 from rtp_llm.models_py.modules.dsv41.fp8._trap_utils import (
     trap_invalid_kv_access_enabled,
 )
@@ -80,10 +81,12 @@ def _indexer_k_quant_kernel(
     num_cache_blocks: tl.constexpr,
     fp8_max: tl.constexpr,
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
     """One program per token. Loads the [D] vector, computes per-vector
     absmax + fp32 scale, casts to FP8, and writes into the per-block
     K region + per-token scale slot. Layout is vLLM/DeepGEMM-compatible."""
+    pdl_sync(USE_PDL)
     pid = tl.program_id(0).to(tl.int64)
     if pid >= T:
         return
@@ -152,6 +155,7 @@ def quantize_indexer_k(
         fp8_max=FP8_E4M3_MAX,
         TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
         num_warps=4,
+        **launch_options(k_bf16),
     )
 
 
@@ -172,7 +176,9 @@ def _indexer_k_dequant_kernel(
     num_cache_blocks: tl.constexpr,
     OUT_DTYPE: tl.constexpr,
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     pid = tl.program_id(0).to(tl.int64)
     if pid >= T:
         return
@@ -249,5 +255,6 @@ def dequantize_indexer_k(
         OUT_DTYPE=_OUT_DTYPE,
         TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
         num_warps=4,
+        **launch_options(kv_cache_packed),
     )
     return out

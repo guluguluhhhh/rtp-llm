@@ -9,6 +9,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41._pdl import launch_options, pdl_sync
+
 
 class DSparkMetadata(NamedTuple):
     query_slots: torch.Tensor  # int64 [B * gamma]
@@ -52,7 +54,9 @@ def _dspark_metadata_kernel(
     ENTRIES: tl.constexpr,
     TOKENS_PER_BLOCK: tl.constexpr,
     BLOCK: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     row = tl.program_id(0).to(tl.int64)
     tile = tl.program_id(1)
     request = row // GAMMA
@@ -193,5 +197,6 @@ def try_build_dspark_metadata(
             TOKENS_PER_BLOCK=tokens_per_block,
             BLOCK=256,
             num_warps=4,
+            **launch_options(query_positions),
         )
     return result

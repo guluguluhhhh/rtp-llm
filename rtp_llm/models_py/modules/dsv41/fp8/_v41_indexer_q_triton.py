@@ -21,6 +21,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41._pdl import launch_options, pdl_sync
+
 from ._v41_fp4_triton import _pack_e2m1_payload, _round_power_of_two_scale
 
 
@@ -62,7 +64,9 @@ def _fused_indexer_q_rope_fp4_kernel(
     MAX_POSITION: tl.constexpr,
     SELECTION_WIDTH: tl.constexpr,
     CANDIDATE_WIDTH: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     row = tl.program_id(0).to(tl.int64)
     token = row // 32
     position = tl.load(positions_ptr + token).to(tl.int64)
@@ -112,9 +116,11 @@ def _fused_indexer_q_rope_fp4_rows_kernel(
     MAX_POSITION: tl.constexpr,
     SELECTION_WIDTH: tl.constexpr,
     CANDIDATE_WIDTH: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
     # Four adjacent heads share one CTA and one position read. The caller's
     # 32-head contract makes the row count divisible by four.
+    pdl_sync(USE_PDL)
     row = tl.program_id(0) * 4 + tl.arange(0, 4)
     token = row // 32
     head = row % 32
@@ -314,5 +320,6 @@ def try_fused_indexer_q(
         candidates_out.shape[1] if candidates_out is not None else 0,
         num_warps=1 if grouped else 4,
         enable_fp_fusion=False,
+        **launch_options(q),
     )
     return payload, sf, scaled_weights

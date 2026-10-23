@@ -33,7 +33,13 @@ __global__ void per_token_group_quant_v3_kernel(const __nv_bfloat16* __restrict_
                                                 uint32_t* __restrict__ scales,
                                                 int     groups,
                                                 int     groups_per_row,
-                                                int64_t scale_stride) {
+                                                int64_t scale_stride,
+                                                bool    enable_pdl) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+    if (enable_pdl) {
+        cudaGridDependencySynchronize();
+    }
+#endif
     constexpr int THREADS_PER_GROUP = 2;
     const int     group  = blockIdx.x * (BLOCK_THREADS / THREADS_PER_GROUP) + threadIdx.x / THREADS_PER_GROUP;
     const int     lane   = threadIdx.x & 1;
@@ -47,7 +53,9 @@ __global__ void per_token_group_quant_v3_kernel(const __nv_bfloat16* __restrict_
     for (int i = 0; i < 2; ++i) {
         data.words[i] = make_uint4(0, 0, 0, 0);
         if (group < groups) {
-            data.words[i] = reinterpret_cast<const uint4*>(input + offset)[i];
+            const auto* ptr = reinterpret_cast<const uint4*>(input + offset) + i;
+            // PDL consumers must not use the noncoherent read-only cache.
+            data.words[i] = enable_pdl ? __ldca(ptr) : *ptr;
         }
         unsigned a = __vmaxu2(data.words[i].x & 0x7fff7fff, data.words[i].y & 0x7fff7fff);
         unsigned b = __vmaxu2(data.words[i].z & 0x7fff7fff, data.words[i].w & 0x7fff7fff);
@@ -88,7 +96,10 @@ __global__ void per_token_group_quant_v3_kernel(const __nv_bfloat16* __restrict_
 
 }  // namespace
 
-void per_token_group_quant_fp8_v3(const at::Tensor& input, at::Tensor& output_q, at::Tensor& output_s) {
+void per_token_group_quant_fp8_v3(const at::Tensor& input,
+                                  at::Tensor&       output_q,
+                                  at::Tensor&       output_s,
+                                  bool              enable_pdl) {
     TORCH_CHECK(input.is_cuda() && input.device() == output_q.device() && input.device() == output_s.device(),
                 "v3 requires tensors on the same CUDA device");
     TORCH_CHECK(input.scalar_type() == at::kBFloat16, "v3 requires BF16 input");
@@ -116,18 +127,31 @@ void per_token_group_quant_fp8_v3(const at::Tensor& input, at::Tensor& output_q,
                     && !overlaps(output_q, q_bytes, output_s, s_bytes),
                 "v3 input, Q and scales must not overlap (including scale padding)");
     const c10::cuda::CUDAGuard guard(input.device());
-    const int                  groups = static_cast<int>(input.numel() / 32);
-    auto                       launch = [&](auto block_size, auto columns) {
-        constexpr int threads = decltype(block_size)::value;
-        constexpr int width   = decltype(columns)::value;
-        const int     blocks = static_cast<int>((static_cast<int64_t>(groups) * 2 + threads - 1) / threads);
-        per_token_group_quant_v3_kernel<threads, width><<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
-            reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
-            reinterpret_cast<uint8_t*>(output_q.data_ptr()),
-            reinterpret_cast<uint32_t*>(output_s.data_ptr()),
-            groups,
-            static_cast<int>(k / 32),
-            output_s.stride(1));
+    TORCH_CHECK(!enable_pdl || at::cuda::getDeviceProperties(input.get_device())->major >= 9,
+                "PDL requires SM90 or newer");
+    const int groups = static_cast<int>(input.numel() / 32);
+    auto      launch = [&](auto block_size, auto columns) {
+        constexpr int       threads = decltype(block_size)::value;
+        constexpr int       width   = decltype(columns)::value;
+        const int           blocks  = static_cast<int>((static_cast<int64_t>(groups) * 2 + threads - 1) / threads);
+        cudaLaunchAttribute attr{};
+        attr.id                                         = cudaLaunchAttributeProgrammaticStreamSerialization;
+        attr.val.programmaticStreamSerializationAllowed = 1;
+        cudaLaunchConfig_t config{};
+        config.gridDim  = dim3(blocks);
+        config.blockDim = dim3(threads);
+        config.stream   = at::cuda::getCurrentCUDAStream();
+        config.attrs    = &attr;
+        config.numAttrs = enable_pdl ? 1 : 0;
+        C10_CUDA_CHECK(cudaLaunchKernelEx(&config,
+                                          per_token_group_quant_v3_kernel<threads, width>,
+                                          reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
+                                          reinterpret_cast<uint8_t*>(output_q.data_ptr()),
+                                          reinterpret_cast<uint32_t*>(output_s.data_ptr()),
+                                          groups,
+                                          static_cast<int>(k / 32),
+                                          output_s.stride(1),
+                                          enable_pdl));
     };
     auto dispatch = [&](auto columns) {
         if (input.numel() <= 512 * 1024) {

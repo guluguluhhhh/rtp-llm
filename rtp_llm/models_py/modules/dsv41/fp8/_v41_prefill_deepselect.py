@@ -14,6 +14,7 @@ from functools import lru_cache
 
 import torch
 
+from rtp_llm.models_py.modules.dsv41._pdl import enabled as pdl_enabled
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 
@@ -116,5 +117,10 @@ def try_select_tokens(logits, ends, *, out=None, filter_finite=True, enabled=Non
         if logits.dtype == torch.bfloat16
         else rtp_llm_ops.deepselect_fp32
     )
-    select(logits, ends, out, filter_finite)
+    options = (
+        {"enable_pdl": pdl_enabled(logits.device)}
+        if logits.dtype == torch.bfloat16
+        else {}
+    )
+    select(logits, ends, out, filter_finite, **options)
     return out

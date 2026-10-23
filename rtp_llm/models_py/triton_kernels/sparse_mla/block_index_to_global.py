@@ -26,7 +26,10 @@ def _convert_req_index_to_global_index_kernel(
     ti_stride1,
     out_stride0,
     out_stride1,
+    ENABLE_PDL: tl.constexpr = False,
 ):
+    if ENABLE_PDL:
+        tl.extra.cuda.gdc_wait()
     # program_id(0) -> token_id (row)
     # program_id(1) -> tile index along columns
     token_id = tl.program_id(0)
@@ -85,6 +88,7 @@ def triton_convert_req_index_to_global_index(
     HAS_PREFILL_WORKSPACE: bool = False,
     prefill_workspace_request_ids: torch.Tensor | None = None,
     prefill_workspace_starts: torch.Tensor | None = None,
+    enable_pdl: bool = False,
 ):
     """
     out[token_id, indice_id] =
@@ -170,5 +174,7 @@ def triton_convert_req_index_to_global_index(
         ti_stride1,
         out_stride0,
         out_stride1,
+        ENABLE_PDL=enable_pdl,
+        **({"launch_pdl": True} if enable_pdl else {}),
     )
     return out

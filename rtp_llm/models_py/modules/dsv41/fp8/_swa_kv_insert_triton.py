@@ -23,6 +23,7 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41._pdl import launch_options, pdl_sync
 from rtp_llm.models_py.modules.dsv41.fp8._swa_cp_byte_sliced import (
     CPByteSlicedSlotCompaction,
 )
@@ -65,6 +66,7 @@ def _quantize_and_insert_k_kernel(
     fp8_max: tl.constexpr,  # 448.0
     n_quant_blocks: tl.constexpr,  # 8 (7 real + 1 padding tile-loop iter)
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
     """One program per token. Block layout per pool block:
     [0, cache_block_size * 576)             — token data (NoPE+RoPE interleaved)
@@ -72,6 +74,7 @@ def _quantize_and_insert_k_kernel(
      cache_block_size * 576 + cache_block_size * 8)  — scales
     [..., block_stride)                      — TMA padding
     """
+    pdl_sync(USE_PDL)
     pid = tl.program_id(0).to(tl.int64)
     if pid >= num_tokens:
         return
@@ -198,6 +201,7 @@ def quantize_and_insert_k_cache(
         fp8_max=_FP8_MAX,
         n_quant_blocks=8,
         TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
+        **launch_options(k),
     )
 
 

@@ -27,6 +27,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41._pdl import launch_options, pdl_sync
+
 from . import _v41_candidate_topk_v3 as candidate_topk
 
 DEFAULT_MAX_BITMAP_BYTES = 256 * 1024 * 1024
@@ -126,7 +128,9 @@ def _prefill_candidate_pool_kernel(
     token_ends=None,
     FILTER_TOKENS: tl.constexpr = False,
     block_lengths=None,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     row = tl.program_id(0).to(tl.int64)
     blocks = tl.program_id(1) * TILE + tl.arange(0, TILE)
     offsets = tl.arange(0, BLOCK_SIZE)
@@ -189,7 +193,9 @@ def _prefill_candidate_store_bitmap_kernel(
     FLAG_TILE: tl.constexpr,
     NBLOCKS=0,
     SCORE_TABLE: tl.constexpr = False,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     row = tl.program_id(0).to(tl.int64)
     if WRITE_FLAGS:
         word = tl.arange(0, FLAG_TILE)
@@ -230,7 +236,9 @@ def _prefill_candidate_mask_kernel(
     FLAG_STRIDE,
     BLOCK_SIZE: tl.constexpr,
     TILE: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     row = tl.program_id(0).to(tl.int64)
     columns = tl.program_id(1) * TILE + tl.arange(0, TILE)
     block = columns // BLOCK_SIZE
@@ -255,7 +263,9 @@ def _prefill_candidate_build_bitmap_kernel(
     FLAG_WORDS,
     FLAG_STRIDE,
     FLAG_TILE: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     row = tl.program_id(0).to(tl.int64)
     word = tl.arange(0, FLAG_TILE)
     tl.store(flags + row * FLAG_STRIDE + word, 0, word < FLAG_WORDS)
@@ -382,7 +392,8 @@ def select_candidates(
     if not build_bitmap:
         flags = None
         if nblocks <= topk_blocks and not (
-            topk_blocks == 2048 and candidate_topk.is_available("prefill", logits.device)
+            topk_blocks == 2048
+            and candidate_topk.is_available("prefill", logits.device)
         ):
             # Every block is selected, so only pooling/pinning/filtering remain.
             _prefill_candidate_pool_kernel[(rows, triton.cdiv(out.shape[1], 128))](
@@ -402,6 +413,7 @@ def select_candidates(
                 token_indices,
                 token_ends,
                 token_indices is not None,
+                **launch_options(logits),
             )
             return out, None
     # Long rows must retain Torch's NaN-before-+inf selection contract. The
@@ -432,6 +444,7 @@ def select_candidates(
         token_ends=token_ends,
         FILTER_TOKENS=token_indices is not None,
         block_lengths=block_lengths,
+        **launch_options(logits),
     )
     if use_v3:
         indices = candidate_topk.select(scores, block_lengths)
@@ -452,6 +465,7 @@ def select_candidates(
         triton.next_power_of_2(flags.shape[1]) if flags is not None else 1,
         NBLOCKS=nblocks,
         SCORE_TABLE=use_v3,
+        **launch_options(values),
     )
     return out, flags
 
@@ -498,6 +512,7 @@ def build_flags(
         flags.shape[1],
         flags.stride(0),
         triton.next_power_of_2(flags.shape[1]),
+        **launch_options(candidates),
     )
     return flags
 
@@ -524,6 +539,13 @@ def mask_candidates(logits: torch.Tensor, flags: torch.Tensor, block_size: int) 
         return False
     rows, width = logits.shape
     _prefill_candidate_mask_kernel[(rows, triton.cdiv(width, 1024))](
-        logits, flags, width, logits.stride(0), flags.stride(0), block_size, 1024
+        logits,
+        flags,
+        width,
+        logits.stride(0),
+        flags.stride(0),
+        block_size,
+        1024,
+        **launch_options(logits),
     )
     return True

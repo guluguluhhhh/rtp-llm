@@ -14,6 +14,7 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41._pdl import launch_options, pdl_sync
 from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
 
 
@@ -26,7 +27,9 @@ def _strided_q_rmsnorm_kernel(
     D: tl.constexpr,
     EPS: tl.constexpr,
     BLOCK: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     row = tl.program_id(0).to(tl.int64)
     cols = tl.arange(0, BLOCK)
     w = tl.load(W + cols, cols < D, 0).to(tl.float32)
@@ -52,6 +55,7 @@ def strided_q_rmsnorm(x: torch.Tensor, weight: torch.Tensor, eps: float):
             BLOCK=triton.next_power_of_2(shape[-1]),
             num_warps=8 if shape[-1] > 1024 else 4,
             enable_fp_fusion=False,
+            **launch_options(flat),
         )
     return output
 

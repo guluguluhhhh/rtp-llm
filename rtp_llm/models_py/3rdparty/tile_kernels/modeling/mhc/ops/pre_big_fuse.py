@@ -43,9 +43,12 @@ def _run_tilelang_single_gemm(
     gemm_out_sqrsum: torch.Tensor,
     mhc_mult3: int,
     mhc_hidden_size: int,
+    enable_pdl: bool = False,
 ) -> int:
     fn = round_to_tf32(fn)
-    fwd_mul_kernel = _mhc_pre_norm_fn_fwd_mul(mhc_mult3, 1, mhc_hidden_size)
+    fwd_mul_kernel = _mhc_pre_norm_fn_fwd_mul(
+        mhc_mult3, 1, mhc_hidden_size, enable_pdl=enable_pdl
+    )
     fwd_mul_kernel(
         residual_flat.view(-1, mhc_hidden_size),
         fn,
@@ -86,6 +89,7 @@ def mhc_pre_big_fuse(
     n_splits: int = 16,
     previous_pre_mix: torch.Tensor | None = None,
     gemm_backend: str | None = None,
+    enable_pdl: bool = False,
 ) -> tuple[torch.Tensor, ...]:
     assert residual.dtype == torch.bfloat16
     assert fn.dtype == torch.float32
@@ -159,6 +163,7 @@ def mhc_pre_big_fuse(
             gemm_out_sqrsum,
             mhc_mult3,
             mhc_hidden_size,
+            enable_pdl=enable_pdl,
         )
         gemm_out_mul = gemm_out_mul[:1]
         gemm_out_sqrsum = gemm_out_sqrsum[:1]
@@ -183,6 +188,7 @@ def mhc_pre_big_fuse(
         n_splits=n_splits,
         mhc_mult=mhc_mult,
         delayed=delayed,
+        enable_pdl=enable_pdl,
     )(
         gemm_out_mul,
         gemm_out_sqrsum,

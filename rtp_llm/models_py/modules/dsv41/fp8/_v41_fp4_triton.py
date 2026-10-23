@@ -44,6 +44,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41._pdl import launch_options, pdl_sync
+
 FP4_GLOBAL_HEAD_DIM = 512
 FP4_GLOBAL_GROUP = 16
 FP4_GLOBAL_ENTRY_BYTES = 288  # 256B e2m1 payload + 32B E4M3 scales
@@ -120,7 +122,9 @@ def _fp4_global_insert_kernel(
     cache_block_size: tl.constexpr,
     block_stride,  # bytes per block (from cache.stride(0))
     num_cache_blocks,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     pid = tl.program_id(0).to(tl.int64)
     if pid >= T:
         return
@@ -163,7 +167,9 @@ def _fp4_global_dequant_kernel(
     num_cache_blocks,
     OUT_DTYPE: tl.constexpr,
     IDENTITY_SLOTS: tl.constexpr = False,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     pid = tl.program_id(0).to(tl.int64)
     if pid >= N:
         return
@@ -235,6 +241,7 @@ def quantize_and_insert_k_cache_fp4(
         block_stride=int(k_cache.stride(0)),
         num_cache_blocks=int(k_cache.shape[0]),
         num_warps=4,
+        **launch_options(k),
     )
 
 
@@ -249,7 +256,9 @@ def _fp4_global_gather_bytes_kernel(
     cache_block_size: tl.constexpr,
     block_stride,
     num_cache_blocks,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     pid = tl.program_id(0).to(tl.int64)
     if pid >= N:
         return
@@ -322,6 +331,7 @@ def dequantize_k_cache_slots_fp4(
         num_cache_blocks=int(pool_3d.shape[0]),
         OUT_DTYPE=_OUT_DTYPE,
         num_warps=4,
+        **launch_options(pool_3d),
     )
     return out
 
@@ -357,6 +367,7 @@ def gather_k_cache_bytes_fp4(
         block_stride=int(pool_3d.stride(0)),
         num_cache_blocks=int(pool_3d.shape[0]),
         num_warps=4,
+        **launch_options(pool_3d),
     )
     return out
 
@@ -399,6 +410,7 @@ def dequantize_k_cache_bytes_fp4(
         OUT_DTYPE=_OUT_DTYPE,
         IDENTITY_SLOTS=True,
         num_warps=4,
+        **launch_options(pool_view),
     )
     return out
 
@@ -418,7 +430,9 @@ def _fp4_indexer_insert_kernel(
     cache_block_size: tl.constexpr,
     block_stride,  # bytes per block (from cache.stride(0))
     num_cache_blocks,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     pid = tl.program_id(0).to(tl.int64)
     if pid >= T:
         return
@@ -460,7 +474,9 @@ def _fp4_indexer_gather_kernel(
     cache_block_size: tl.constexpr,
     block_stride,
     num_cache_blocks,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     pid = tl.program_id(0).to(tl.int64)
     if pid >= N:
         return
@@ -520,7 +536,9 @@ def _fp4_indexer_dequant_kernel(
     block_stride,
     num_cache_blocks,
     OUT_DTYPE: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     pid = tl.program_id(0).to(tl.int64)
     if pid >= N:
         return
@@ -567,6 +585,7 @@ def quantize_indexer_k_fp4(
         block_stride=int(kv_cache_packed.stride(0)),
         num_cache_blocks=int(kv_cache_packed.shape[0]),
         num_warps=4,
+        **launch_options(k_bf16),
     )
 
 
@@ -600,6 +619,7 @@ def gather_indexer_k_fp4(
         block_stride=int(kv_cache_packed.stride(0)),
         num_cache_blocks=int(kv_cache_packed.shape[0]),
         num_warps=4,
+        **launch_options(kv_cache_packed),
     )
     return payload, sf
 
@@ -639,6 +659,7 @@ def dequantize_indexer_k_fp4(
         num_cache_blocks=int(kv_cache_packed.shape[0]),
         OUT_DTYPE=_OUT_DTYPE,
         num_warps=4,
+        **launch_options(kv_cache_packed),
     )
     return out
 
@@ -654,7 +675,9 @@ def _fp4_row_quant_kernel(
     R,
     D: tl.constexpr,  # 128
     GROUP: tl.constexpr,  # 32
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     pid = tl.program_id(0).to(tl.int64)
     if pid >= R:
         return
@@ -694,5 +717,6 @@ def quantize_rows_fp4(
             D=FP4_INDEXER_HEAD_DIM,
             GROUP=FP4_INDEXER_GROUP,
             num_warps=4,
+            **launch_options(x),
         )
     return payload.view(*shape[:-1], FP4_INDEXER_HEAD_DIM // 2), sf.view(*shape[:-1])

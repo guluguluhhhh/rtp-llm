@@ -44,6 +44,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
+from rtp_llm.models_py.modules.dsv41._pdl import enabled as pdl_enabled
+
 
 @dataclass
 class DSv4DecodeAttnMetadataFP8:
@@ -324,6 +326,7 @@ def update_decoder_swa_metadata(meta, entries_per_block, *, batch_size=None):
         meta.swa_abs_idx[:batch_size].reshape(count, meta.window_size),
         eb,
         tpb,
+        enable_pdl=pdl_enabled(table.device),
     )
     child.swa_global_slots[:count].copy_(reads)
     child.batch_size = batch_size
@@ -1105,7 +1108,9 @@ def update_decode_metadata_in_place_fp8(
     bs = int(start_pos.shape[0])
     live_requests = bs if valid_request_count is None else int(valid_request_count)
     if not 0 <= live_requests <= bs <= meta.start_pos.numel():
-        raise ValueError("Decode valid request count must fit the prepared/captured batch")
+        raise ValueError(
+            "Decode valid request count must fit the prepared/captured batch"
+        )
     position_ids_2d = _build_position_ids_2d(start_pos, q_len, device)
     position_ids_flat = position_ids_2d.reshape(-1).contiguous()
     meta.position_ids[: bs * q_len].copy_(position_ids_flat)
@@ -1120,7 +1125,10 @@ def update_decode_metadata_in_place_fp8(
     )
 
     fused_update_decode_meta_pure(
-        meta, start_pos, meta.max_seq_len, valid_request_count=live_requests,
+        meta,
+        start_pos,
+        meta.max_seq_len,
+        valid_request_count=live_requests,
     )
 
     # opt_flash_mla: derive FlashMLA topk_length / extra_topk_length from the
@@ -1211,6 +1219,7 @@ def update_decode_metadata_in_place_fp8(
                 swa_local,
                 entries_per_block=swa_eb,
                 tokens_per_block_for_block_table=swa_tokens_per_block,
+                enable_pdl=pdl_enabled(swa_local.device),
             )
             meta.swa_global_slots[:T].copy_(swa_global_new)
 
@@ -1235,6 +1244,7 @@ def update_decode_metadata_in_place_fp8(
                 hca_cmp_local,
                 entries_per_block=hca_eb,
                 tokens_per_block_for_block_table=hca_tokens_per_block,
+                enable_pdl=pdl_enabled(hca_cmp_local.device),
             )
             meta.hca_cmp_global_slots[:T].copy_(hca_global_new)
 
@@ -1529,6 +1539,7 @@ def build_decode_metadata_fp8(
                 swa_abs_idx.reshape(T_total, window_size),
                 entries_per_block=swa_eb,
                 tokens_per_block_for_block_table=swa_tokens_per_block,
+                enable_pdl=pdl_enabled(swa_abs_idx.device),
             )
 
         if HCA_KV in pool_block_tables and 128 in topk_total_by_ratio:
@@ -1544,6 +1555,7 @@ def build_decode_metadata_fp8(
                 hca_tt[:, :, window_size:].reshape(T_total, K_h).contiguous(),
                 entries_per_block=hca_eb,
                 tokens_per_block_for_block_table=hca_tokens_per_block,
+                enable_pdl=pdl_enabled(hca_tt.device),
             )
 
     meta = DSv4DecodeAttnMetadataFP8(

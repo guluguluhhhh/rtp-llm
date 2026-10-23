@@ -38,6 +38,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41._pdl import launch_options, pdl_sync
+
 
 @lru_cache(maxsize=None)
 def _device_capability_at_index(index: int) -> tuple[int, int]:
@@ -93,8 +95,10 @@ def _fused_inv_rope_fp8_quant_per_head(
     HALF_ROPE: tl.constexpr,  # rope_head_dim // 2
     ROUND_ROPE_TO_INPUT_DTYPE: tl.constexpr,
     SCALE_MIN: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
     # int64: stride multiply overflows int32 past num_tokens=32768 (IMA).
+    pdl_sync(USE_PDL)
     pid_token = tl.program_id(0).to(tl.int64)
     pid_gh = tl.program_id(1).to(tl.int64)
 
@@ -246,7 +250,9 @@ def _fused_inv_rope_fp8_quant_group_heads(
     HEADS_PER_CTA: tl.constexpr,
     ROUND_ROPE_TO_INPUT_DTYPE: tl.constexpr,
     SCALE_MIN: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     pid_token = tl.program_id(0).to(tl.int64)
     g = tl.program_id(1).to(tl.int64)
     head_tile = tl.program_id(2).to(tl.int64)
@@ -495,6 +501,7 @@ def fused_inv_rope_fp8_quant(
             enable_fp_fusion=not round_rope_to_input_dtype,
             num_warps=1,
             num_stages=1,
+            **launch_options(o_flat),
         )
     elif selected_impl == "optimized":
         env_heads_per_cta = (
@@ -544,6 +551,7 @@ def fused_inv_rope_fp8_quant(
             enable_fp_fusion=not round_rope_to_input_dtype,
             num_warps=selected_num_warps,
             num_stages=1,
+            **launch_options(o_flat),
         )
     # Transpose (0, 1) so the consumer sees [M, G, …]:
     #   fp8  : [M, G, d]          stride (d, M*d, 1)   — contiguous-like on inner

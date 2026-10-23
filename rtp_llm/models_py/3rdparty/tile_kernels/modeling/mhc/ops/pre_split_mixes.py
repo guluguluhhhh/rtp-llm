@@ -17,6 +17,7 @@ class MHCPreSplitMixes(torch.autograd.Function):
         mhc_mult: int,
         mhc_post_mult_value: float,
         mhc_pre_eps: float,
+        enable_pdl: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         mhc_mult2 = mhc_mult * mhc_mult
         mhc_mult3 = mhc_mult * 2 + mhc_mult2
@@ -35,6 +36,7 @@ class MHCPreSplitMixes(torch.autograd.Function):
             mhc_post_mult_value,
             mhc_pre_eps,
             token_block_size=32,
+            enable_pdl=enable_pdl,
         )
         fwd_kernel(
             input_mixes,
@@ -128,6 +130,7 @@ def mhc_pre_split_mixes(
     mhc_mult: int,
     mhc_post_mult_value: float,
     mhc_pre_eps: float,
+    enable_pdl: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if not torch.is_grad_enabled() and not torch.compiler.is_compiling():
         return MHCPreSplitMixes.forward(
@@ -138,6 +141,7 @@ def mhc_pre_split_mixes(
             mhc_mult,
             mhc_post_mult_value,
             mhc_pre_eps,
+            enable_pdl=enable_pdl,
         )
     return MHCPreSplitMixes.apply(
         input_mixes,

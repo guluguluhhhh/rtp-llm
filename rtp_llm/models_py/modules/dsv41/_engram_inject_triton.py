@@ -10,6 +10,8 @@ RTP uses contiguous local tokens and preserves copysign at zero.
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41._pdl import pdl_sync
+
 
 @triton.jit
 def engram_inject_kernel(
@@ -24,7 +26,9 @@ def engram_inject_kernel(
     HAS_MASK: tl.constexpr,
     EPS: tl.constexpr,
     BLOCK: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     token = tl.program_id(0).to(tl.int64)
     head = tl.program_id(1)
     col = tl.arange(0, BLOCK)

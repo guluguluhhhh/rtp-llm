@@ -24,6 +24,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41._pdl import launch_options, pdl_sync
+
 
 @triton.jit(do_not_specialize=["valid_request_count"])
 def _fused_prepare_meta_kernel(
@@ -58,7 +60,9 @@ def _fused_prepare_meta_kernel(
     BLOCK_HCA: tl.constexpr,  # >= HCA_DENSE_WIDTH, power of 2
     HAS_CMP_4: tl.constexpr,  # False for SWA-only (MTP draft)
     HAS_CMP_128: tl.constexpr,  # False when no HCA layers
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     r = tl.program_id(0)
     q = tl.program_id(1)
     if valid_requests_ptr is not None:
@@ -173,7 +177,8 @@ def fused_update_decode_meta_pure(
     meta: Any,
     start_pos: torch.Tensor,
     max_seq_len: int,
-    *, valid_request_count: int | None = None,
+    *,
+    valid_request_count: int | None = None,
 ) -> None:
     """Fuse the pure-start_pos metadata preparation into a single Triton kernel.
 
@@ -193,12 +198,15 @@ def fused_update_decode_meta_pure(
     if not 0 <= live_requests <= bs:
         raise ValueError("Invalid decode live request count")
     if valid_requests is not None and not (
-        valid_requests.ndim == 1 and valid_requests.numel() >= bs
+        valid_requests.ndim == 1
+        and valid_requests.numel() >= bs
         and valid_requests.dtype == torch.bool
         and valid_requests.device == start_pos.device
         and valid_requests.is_contiguous()
     ):
-        raise ValueError("Decode validity must be contiguous bool storage covering the prepared batch")
+        raise ValueError(
+            "Decode validity must be contiguous bool storage covering the prepared batch"
+        )
     q_len = meta.q_len_per_req
     window_size = meta.window_size
     index_topk = meta.topk_buffer_compressed.shape[-1]
@@ -261,6 +269,7 @@ def fused_update_decode_meta_pure(
         BLOCK_HCA=BLOCK_HCA,
         HAS_CMP_4=has_4,
         HAS_CMP_128=has_128,
+        **launch_options(start_pos),
     )
 
 
@@ -322,7 +331,9 @@ def _fused_phase2b_pool_slot_mapping_kernel(
     HAS_CSA: tl.constexpr,
     HAS_IDX: tl.constexpr,
     HAS_HCA: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     r = tl.program_id(0)
     q = tl.program_id(1)
     if r >= bs:
@@ -486,4 +497,5 @@ def fused_phase2b_pool_slot_mapping(
         HAS_CSA=has_csa,
         HAS_IDX=has_idx,
         HAS_HCA=has_hca,
+        **launch_options(start_pos),
     )

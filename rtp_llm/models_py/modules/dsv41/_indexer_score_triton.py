@@ -40,6 +40,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41._pdl import launch_options, pdl_sync
+
 
 @triton.jit(
     do_not_specialize=[
@@ -81,6 +83,7 @@ def _v4_indexer_score_fwd(
     BLOCK_T: tl.constexpr,
     # toggles
     APPLY_MASK: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
     """One program covers one (b, s_block, t_block) tile.
 
@@ -89,6 +92,7 @@ def _v4_indexer_score_fwd(
     using fp32 accumulators.  D and H are kept as compile-time constants
     so each per-head dot is unrolled into a 1-shot tile load + reduce.
     """
+    pdl_sync(USE_PDL)
     pid_b = tl.program_id(0).to(tl.int64)
     pid_s = tl.program_id(1).to(tl.int64)
     pid_t = tl.program_id(2).to(tl.int64)
@@ -227,5 +231,6 @@ def v4_indexer_score(
         APPLY_MASK=apply_mask,
         num_warps=4,
         num_stages=2,
+        **launch_options(q),
     )
     return out

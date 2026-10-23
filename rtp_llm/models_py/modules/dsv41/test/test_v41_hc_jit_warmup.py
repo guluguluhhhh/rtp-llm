@@ -413,26 +413,30 @@ class V41HCJitWarmupCPU(unittest.TestCase):
         calls = []
         ops = SimpleNamespace()
 
-        def norm(residual, fn, weight, eps, n_splits):
+        def norm(residual, fn, weight, eps, n_splits, enable_pdl):
             calls.append("norm")
+            self.assertTrue(enable_pdl)
             self.assertEqual(n_splits, 1)
             return torch.zeros(1, 65, 24)
 
-        def split(mixes, scale, base, hc, post_scale, eps):
+        def split(mixes, scale, base, hc, post_scale, eps, enable_pdl):
             calls.append("split")
+            self.assertTrue(enable_pdl)
             return (
                 torch.ones(1, 65, 4, 1),
                 torch.ones(1, 65, 4, 1),
                 torch.ones(1, 65, 4, 4),
             )
 
-        def sinkhorn(comb, *, repeat, eps):
+        def sinkhorn(comb, *, repeat, eps, enable_pdl):
             calls.append("sinkhorn")
+            self.assertTrue(enable_pdl)
             self.assertEqual(repeat, 20)
             return comb
 
-        def apply(residual, pre):
+        def apply(residual, pre, enable_pdl):
             calls.append("apply")
+            self.assertTrue(enable_pdl)
             return residual[:, :, 0, :].contiguous()
 
         def post(hidden, residual, post, comb, *, out):
@@ -446,7 +450,9 @@ class V41HCJitWarmupCPU(unittest.TestCase):
             apply,
             post,
         )
-        with patch.object(warmup, "_tile_ops", return_value=ops):
+        with patch.object(warmup, "_tile_ops", return_value=ops), patch.object(
+            warmup, "pdl_enabled", return_value=True
+        ):
             warmup._launch_tilelang_chain(source, 65, "cpu", include_norm=True)
         self.assertEqual(calls, ["norm", "split", "sinkhorn", "apply", "post"])
         self.assertIsNone(source.pre_mix_out)

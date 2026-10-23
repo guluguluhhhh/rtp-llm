@@ -8,6 +8,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41._pdl import launch_options, pdl_sync
+
 
 @triton.jit(do_not_specialize=["M", "out_scale_stride_k"])
 def _rmsnorm_fp8_quant_kernel(
@@ -29,7 +31,9 @@ def _rmsnorm_fp8_quant_kernel(
     BLOCK_N: tl.constexpr,
     GROUP_SIZE: tl.constexpr,
     SCALE_PACKS: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     pid_m = tl.program_id(0).to(tl.int64)
     if pid_m >= M:
         return
@@ -129,5 +133,6 @@ def rmsnorm_fp8_quant_ue8m0(
         SCALE_PACKS=scale_packs,
         num_warps=8 if block_n >= 4096 else 4,
         num_stages=2,
+        **launch_options(x),
     )
     return out_norm, out_q, out_scale

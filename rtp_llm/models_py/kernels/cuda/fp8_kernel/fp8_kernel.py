@@ -126,7 +126,7 @@ def can_use_per_token_group_quant_v3(x: torch.Tensor, eps: float = 1e-10) -> boo
     )
 
 
-def sgl_per_token_group_quant_fp8_v3(x: torch.Tensor):
+def sgl_per_token_group_quant_fp8_v3(x: torch.Tensor, enable_pdl: bool = False):
     """Quantize finite BF16 [M,K] to E4M3 and packed UE8M0, K % 128 == 0.
 
     Scales follow legacy's 1e-10 floor and have shape [M,K/128], dtype
@@ -144,7 +144,7 @@ def sgl_per_token_group_quant_fp8_v3(x: torch.Tensor):
     scales = torch.empty(
         (k // 128, (m + 3) // 4 * 4), device=x.device, dtype=torch.int32
     ).T[:m]
-    rtp_llm_ops.per_token_group_quant_fp8_v3(x, q, scales)
+    rtp_llm_ops.per_token_group_quant_fp8_v3(x, q, scales, enable_pdl=enable_pdl)
     return q, scales
 
 
@@ -157,6 +157,7 @@ def sgl_per_token_group_quant_fp8(
     scale_ue8m0: bool = False,
     fuse_silu_and_mul: bool = False,
     masked_m: Optional[torch.Tensor] = None,
+    enable_pdl: bool = False,
 ):
     assert (
         x.shape[-1] % group_size == 0
@@ -178,7 +179,7 @@ def sgl_per_token_group_quant_fp8(
     if auto_legacy:
         assert column_major_scales and scale_tma_aligned
         if can_use_per_token_group_quant_v3(x, eps):
-            return sgl_per_token_group_quant_fp8_v3(x)
+            return sgl_per_token_group_quant_fp8_v3(x, enable_pdl=enable_pdl)
 
     out_shape = (*x.shape[:-1], x.shape[-1] // (2 if fuse_silu_and_mul else 1))
     x_q = torch.empty(out_shape, device=x.device, dtype=fp8_dtype)

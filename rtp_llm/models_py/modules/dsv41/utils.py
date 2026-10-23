@@ -7,6 +7,7 @@ from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
 
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.models_py.modules.base.common.embedding import Embedding
+from rtp_llm.models_py.modules.dsv41._pdl import enabled as pdl_enabled
 from rtp_llm.models_py.modules.factory.linear import LinearFactory
 
 _V4_FP8_BLOCK_CFG = Fp8BlockWiseQuantConfig()
@@ -57,6 +58,7 @@ class V41MXFP8Linear(torch.nn.Module):
             column_major_scales=True,
             scale_tma_aligned=True,
             scale_ue8m0=True,
+            enable_pdl=pdl_enabled(flat.device),
         )
         return (
             quantized

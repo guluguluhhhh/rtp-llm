@@ -17,6 +17,7 @@ try:
 except ImportError:
     deep_gemm = None
 
+from rtp_llm.models_py.modules.dsv41._pdl import launch_options, pdl_sync
 from rtp_llm.models_py.modules.dsv41.fp8 import _v41_prefill_deepselect as deepselect
 from rtp_llm.models_py.modules.dsv41.fp8._v41_decode_indexer import (
     prepare_indexer_q_and_weights,
@@ -80,7 +81,9 @@ def _prepare_plan_kernel(
     SORT_I16: tl.constexpr = False,
     PAGE_SIZE: tl.constexpr = PAGE_SIZE,
     valid_requests=None,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     row = tl.program_id(0)
     lanes = tl.arange(0, K)
     values = tl.load(candidates + row * K + lanes)
@@ -143,23 +146,39 @@ def _prepare_plan_kernel(
     tl.store(compact_lengths + row, compact)
     pages = tl.load(
         table + request * TABLE_STRIDE + planned // (PAGE_SIZE // BLOCK_SIZE),
-        lanes < expected, other=0,
+        lanes < expected,
+        other=0,
     )
     exceptional = (lanes < expected) & (~active | (pages <= 0))
-    tl.store(repair_rows + row, (compact > 0) & (tl.sum(exceptional.to(tl.int32), 0) != 0))
+    tl.store(
+        repair_rows + row, (compact > 0) & (tl.sum(exceptional.to(tl.int32), 0) != 0)
+    )
 
 
 @triton.jit
 def _prepare_flags_plan_kernel(
-    flags, lengths, table, sorted_blocks, active_blocks, row_table, requests,
-    compact_lengths, repair_rows,
-    QUERY_LEN: tl.constexpr, K: tl.constexpr, COLS: tl.constexpr,
-    TABLE_STRIDE: tl.constexpr, COL_BLOCK: tl.constexpr,
-    DOMAIN: tl.constexpr, DOMAIN_BLOCK: tl.constexpr,
+    flags,
+    lengths,
+    table,
+    sorted_blocks,
+    active_blocks,
+    row_table,
+    requests,
+    compact_lengths,
+    repair_rows,
+    QUERY_LEN: tl.constexpr,
+    K: tl.constexpr,
+    COLS: tl.constexpr,
+    TABLE_STRIDE: tl.constexpr,
+    COL_BLOCK: tl.constexpr,
+    DOMAIN: tl.constexpr,
+    DOMAIN_BLOCK: tl.constexpr,
     BLOCK_SIZE: tl.constexpr = BLOCK_SIZE,
     PAGE_SIZE: tl.constexpr = PAGE_SIZE,
     valid_requests=None,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     row = tl.program_id(0)
     ids = tl.arange(0, DOMAIN_BLOCK)
     present = tl.load(flags + row * DOMAIN + ids, ids < DOMAIN, other=0) != 0
@@ -193,10 +212,13 @@ def _prepare_flags_plan_kernel(
     tl.store(compact_lengths + row, compact)
     pages = tl.load(
         table + request * TABLE_STRIDE + ids // (PAGE_SIZE // BLOCK_SIZE),
-        selected, other=0,
+        selected,
+        other=0,
     )
     exceptional = selected & (~present | (pages <= 0))
-    tl.store(repair_rows + row, (compact > 0) & (tl.sum(exceptional.to(tl.int32), 0) != 0))
+    tl.store(
+        repair_rows + row, (compact > 0) & (tl.sum(exceptional.to(tl.int32), 0) != 0)
+    )
 
 
 def _plan_candidate_flags(candidates, block_table, candidate_mask):
@@ -217,9 +239,9 @@ def _plan_candidate_flags(candidates, block_table, candidate_mask):
     if (
         flags.ndim != 2
         or flags.shape[0] != candidates.shape[0]
-        or not 0 < flags.shape[1] <= min(
-            4224, block_table.shape[1] * (PAGE_SIZE // BLOCK_SIZE)
-        )
+        or not 0
+        < flags.shape[1]
+        <= min(4224, block_table.shape[1] * (PAGE_SIZE // BLOCK_SIZE))
         or flags.dtype != torch.uint8
         or flags.device != candidates.device
         or not flags.is_contiguous()
@@ -241,13 +263,26 @@ def _has_complete_prefix(candidates, candidate_mask):
 
 @triton.jit
 def _prepare_prefix_plan_kernel(
-    candidates, lengths, table, sorted_blocks, active_blocks, row_table, requests,
-    compact_lengths, repair_rows,
-    QUERY_LEN: tl.constexpr, K: tl.constexpr, COLS: tl.constexpr,
-    TABLE_STRIDE: tl.constexpr, COL_BLOCK: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr = BLOCK_SIZE, PAGE_SIZE: tl.constexpr = PAGE_SIZE,
+    candidates,
+    lengths,
+    table,
+    sorted_blocks,
+    active_blocks,
+    row_table,
+    requests,
+    compact_lengths,
+    repair_rows,
+    QUERY_LEN: tl.constexpr,
+    K: tl.constexpr,
+    COLS: tl.constexpr,
+    TABLE_STRIDE: tl.constexpr,
+    COL_BLOCK: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr = BLOCK_SIZE,
+    PAGE_SIZE: tl.constexpr = PAGE_SIZE,
     valid_requests=None,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     row = tl.program_id(0)
     lanes = tl.arange(0, K)
     length = tl.load(lengths + row)
@@ -260,7 +295,9 @@ def _prepare_prefix_plan_kernel(
     tl.store(active_blocks + row * K + lanes, lanes < expected)
     columns = tl.arange(0, COL_BLOCK)
     request = row // QUERY_LEN
-    physical = tl.load(table + request * TABLE_STRIDE + columns, columns < COLS, other=0)
+    physical = tl.load(
+        table + request * TABLE_STRIDE + columns, columns < COLS, other=0
+    )
     tl.store(row_table + row * COLS + columns, tl.maximum(physical, 0), columns < COLS)
     tl.store(requests + row, request)
     token_counts = tl.minimum(tl.maximum(length - values * BLOCK_SIZE, 0), BLOCK_SIZE)
@@ -271,12 +308,24 @@ def _prepare_prefix_plan_kernel(
     if repair_rows is not None:
         pages = tl.load(
             table + request * TABLE_STRIDE + values // (PAGE_SIZE // BLOCK_SIZE),
-            lanes < expected, other=0,
+            lanes < expected,
+            other=0,
         )
-        tl.store(repair_rows + row, tl.sum(((lanes < expected) & (pages <= 0)).to(tl.int32), 0) != 0)
+        tl.store(
+            repair_rows + row,
+            tl.sum(((lanes < expected) & (pages <= 0)).to(tl.int32), 0) != 0,
+        )
 
 
-def make_plan(candidates, lengths, block_table, *, query_len, candidate_mask=None, valid_requests=None):
+def make_plan(
+    candidates,
+    lengths,
+    block_table,
+    *,
+    query_len,
+    candidate_mask=None,
+    valid_requests=None
+):
     """Build once per forward from unique block IDs and -1 padding.
 
     NaN/-inf source scores may leave fewer candidates than context implies.
@@ -312,7 +361,9 @@ def make_plan(candidates, lengths, block_table, *, query_len, candidate_mask=Non
         and valid_requests.shape == (block_table.shape[0],)
         and valid_requests.is_contiguous()
     ):
-        raise ValueError("Sparse request validity must be contiguous bool [requests] on the query device")
+        raise ValueError(
+            "Sparse request validity must be contiguous bool [requests] on the query device"
+        )
     lengths = lengths.reshape(rows).to(torch.int32).contiguous()
     blocks = torch.empty_like(candidates)
     active = torch.empty_like(candidates, dtype=torch.bool)
@@ -322,10 +373,15 @@ def make_plan(candidates, lengths, block_table, *, query_len, candidate_mask=Non
     requests = torch.empty(rows, device=candidates.device, dtype=torch.int32)
     compact_lengths = torch.empty_like(lengths)
     repair_rows = (
-        None if complete_prefix and valid_requests is not None
+        None
+        if complete_prefix and valid_requests is not None
         else torch.empty(rows, device=candidates.device, dtype=torch.bool)
     )
-    flags = None if complete_prefix else _plan_candidate_flags(candidates, block_table, candidate_mask)
+    flags = (
+        None
+        if complete_prefix
+        else _plan_candidate_flags(candidates, block_table, candidate_mask)
+    )
     common = (
         candidates,
         lengths,
@@ -344,24 +400,33 @@ def make_plan(candidates, lengths, block_table, *, query_len, candidate_mask=Non
     )
     if complete_prefix:
         _prepare_prefix_plan_kernel[(rows,)](
-            *common, valid_requests=valid_requests, num_warps=4,
+            *common,
+            valid_requests=valid_requests,
+            num_warps=4,
+            **launch_options(common[0]),
         )
     elif flags is not None:
         _prepare_flags_plan_kernel[(rows,)](
-            flags, *common[1:], flags.shape[1],
+            flags,
+            *common[1:],
+            flags.shape[1],
             triton.next_power_of_2(flags.shape[1]),
             valid_requests=valid_requests,
             num_warps=4 if flags.shape[1] <= 4096 else 8,
+            **launch_options(flags),
         )
     else:
         _prepare_plan_kernel[(rows,)](
-            *common, k.bit_length(), num_warps=8,
+            *common,
+            k.bit_length(),
+            num_warps=8,
             valid_requests=valid_requests,
             SORT_I16=(
                 k == 2048
                 and block_table.shape[1] * (PAGE_SIZE // BLOCK_SIZE) <= 32767
                 and os.environ.get("DSV41_SPARSE_PLAN_I16", "1") == "1"
             ),
+            **launch_options(common[0]),
         )
     metadata = deep_gemm.get_paged_sparse_mqa_logits_metadata(
         lengths,
@@ -392,7 +457,9 @@ def _clean_logits_kernel(
     TILE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr = BLOCK_SIZE,
     PAGE_SIZE: tl.constexpr = PAGE_SIZE,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     row = tl.program_id(0)
     slot = tl.program_id(1) * TILE + tl.arange(0, TILE)
     block_slot = slot // BLOCK_SIZE
@@ -421,13 +488,22 @@ def _clean_logits_kernel(
 
 @triton.jit
 def _repair_compat_logits_kernel(
-    raw, blocks, active, table, compact_lengths, repair_rows,
-    K: tl.constexpr, RAW_STRIDE: tl.constexpr, TABLE_COLS: tl.constexpr,
+    raw,
+    blocks,
+    active,
+    table,
+    compact_lengths,
+    repair_rows,
+    K: tl.constexpr,
+    RAW_STRIDE: tl.constexpr,
+    TABLE_COLS: tl.constexpr,
     BLOCK_TILE: tl.constexpr = 128,
     BLOCK_SIZE: tl.constexpr = BLOCK_SIZE,
     PAGE_SIZE: tl.constexpr = PAGE_SIZE,
+    USE_PDL: tl.constexpr = False,
 ):
     """No score reads/copies: only exceptional rows write filler/page-0 slots."""
+    pdl_sync(USE_PDL)
     row = tl.program_id(0)
     if tl.load(repair_rows + row):
         end = tl.load(compact_lengths + row)
@@ -439,7 +515,8 @@ def _repair_compat_logits_kernel(
             block = tl.load(blocks + row * K + block_slot, in_prefix, other=0)
             page = tl.load(
                 table + row * TABLE_COLS + block // (PAGE_SIZE // BLOCK_SIZE),
-                in_prefix & selected, other=0,
+                in_prefix & selected,
+                other=0,
             )
             slot = block_slot[:, None] * BLOCK_SIZE + offsets[None, :]
             repair = in_prefix & (~selected | (page <= 0))
@@ -447,7 +524,8 @@ def _repair_compat_logits_kernel(
             value = tl.where(selected, 0.0, -float("inf"))
             tl.store(
                 raw + row * RAW_STRIDE + slot,
-                value[:, None], repair[:, None] & (slot < end),
+                value[:, None],
+                repair[:, None] & (slot < end),
             )
 
 
@@ -463,7 +541,9 @@ def _restore_indices_kernel(
     TOKEN_TOPK: tl.constexpr = TOKEN_TOPK,
     SCORE_STRIDE: tl.constexpr = 0,
     select_lengths=None,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     row = tl.program_id(0)
     lane = tl.program_id(1) * TILE + tl.arange(0, TILE)
     slot = tl.load(output + row * TOKEN_TOPK + lane, lane < TOKEN_TOPK, other=-1)
@@ -496,8 +576,17 @@ def select_tokens(logits, plan, *, inplace=False):
         scores, lengths = logits, plan.compact_lengths
         if plan.repair_rows is not None:
             _repair_compat_logits_kernel[(rows,)](
-                scores, plan.blocks, plan.active, plan.table, lengths, plan.repair_rows,
-                k, scores.stride(0), plan.table.shape[1], num_warps=4,
+                scores,
+                plan.blocks,
+                plan.active,
+                plan.table,
+                lengths,
+                plan.repair_rows,
+                k,
+                scores.stride(0),
+                plan.table.shape[1],
+                num_warps=4,
+                **launch_options(scores),
             )
     else:
         # Keep older/manual plans and borrowed logits non-mutating.
@@ -507,12 +596,28 @@ def select_tokens(logits, plan, *, inplace=False):
         )
         tile = 2048
         _clean_logits_kernel[(rows, triton.cdiv(width, tile))](
-            logits, plan.blocks, plan.active, plan.table, plan.lengths,
-            scores, legacy_lengths, k, logits.stride(0), plan.table.shape[1], tile,
+            logits,
+            plan.blocks,
+            plan.active,
+            plan.table,
+            plan.lengths,
+            scores,
+            legacy_lengths,
+            k,
+            logits.stride(0),
+            plan.table.shape[1],
+            tile,
+            **launch_options(logits),
         )
-        lengths = plan.compact_lengths if plan.compact_lengths is not None else legacy_lengths
+        lengths = (
+            plan.compact_lengths if plan.compact_lengths is not None else legacy_lengths
+        )
     selected = deepselect.try_select_tokens(
-        scores, lengths, out=output, filter_finite=False, enabled=enabled,
+        scores,
+        lengths,
+        out=output,
+        filter_finite=False,
+        enabled=enabled,
     )
     if selected is None:
         # topk_v3 also consumes scores.stride(0); preserve the scorer storage.
@@ -534,6 +639,7 @@ def select_tokens(logits, plan, *, inplace=False):
         256,
         SCORE_STRIDE=scores.stride(0),
         select_lengths=lengths,
+        **launch_options(output),
     )
     return output
 

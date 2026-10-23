@@ -17,6 +17,7 @@ def _mhc_pre_apply_mix_fwd(
     hidden: int,
     n_thr: int = 128,
     h_blk: int = 1024,
+    enable_pdl: bool = False,
 ) -> tilelang.JITKernel:
     n = T.dynamic("n")
     h = hidden
@@ -31,6 +32,8 @@ def _mhc_pre_apply_mix_fwd(
         o: T.Tensor[(n, h), T.bfloat16],
     ) -> None:
         with T.Kernel(n, threads=n_thr) as pid_n:
+            if enable_pdl:
+                T.pdl_sync()
             mixl = T.alloc_fragment(mhc, T.float32)
             T.copy(mix[pid_n, 0], mixl)
 

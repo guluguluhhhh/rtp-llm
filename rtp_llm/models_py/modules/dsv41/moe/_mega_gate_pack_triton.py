@@ -18,6 +18,8 @@ import os
 
 import torch
 
+from rtp_llm.models_py.modules.dsv41._pdl import launch_options, pdl_sync
+
 try:
     import triton
     import triton.language as tl
@@ -107,7 +109,9 @@ if triton is not None:
         BLOCK_M: tl.constexpr,
         BLOCK_E: tl.constexpr,
         BLOCK_K: tl.constexpr,
+        USE_PDL: tl.constexpr = False,
     ):
+        pdl_sync(USE_PDL)
         pid_m_blk = tl.program_id(0).to(tl.int64)
         pid_blk = tl.program_id(1)
         offs_m = pid_m_blk * BLOCK_M + tl.arange(0, BLOCK_M).to(tl.int64)
@@ -210,7 +214,9 @@ if triton is not None:
         fp8_max: tl.constexpr,
         BLOCK_M: tl.constexpr,
         BLOCK_K: tl.constexpr,
+        USE_PDL: tl.constexpr = False,
     ):
+        pdl_sync(USE_PDL)
         pid_m_blk = tl.program_id(0).to(tl.int64)
         pid_blk = tl.program_id(1)
         offs_m = pid_m_blk * BLOCK_M + tl.arange(0, BLOCK_M).to(tl.int64)
@@ -342,6 +348,7 @@ def fused_mega_moe_gate_pack_nonhash(
         BLOCK_E=block_e,
         BLOCK_K=block_k,
         num_warps=4,
+        **launch_options(x),
     )
 
 
@@ -396,6 +403,7 @@ def fused_mega_moe_gate_pack_hash(
         BLOCK_M=block_m,
         BLOCK_K=block_k,
         num_warps=4,
+        **launch_options(x),
     )
 
 

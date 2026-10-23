@@ -9,6 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41._pdl import launch_options, pdl_sync
 from rtp_llm.models_py.modules.dsv41._v41_fused_qkv import is_supported
 from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
 
@@ -165,7 +166,9 @@ def _query_norm_quant_kernel(
     EPS: tl.constexpr,
     BLOCK: tl.constexpr,
     PDL: tl.constexpr = False,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     if PDL:
         # Producer only: QA completion still orders this kernel. The following
         # QB may initialize early but must GDC-wait before reading Q/scales.
@@ -233,6 +236,7 @@ def query_norm_quant(
             PDL=pdl,
             num_warps=8 if width > 1024 else 4,
             enable_fp_fusion=False,
+            **launch_options(flat),
         )
     return normalized, (quantized, scales)
 

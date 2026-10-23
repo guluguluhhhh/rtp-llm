@@ -31,6 +31,7 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41._pdl import launch_options, pdl_sync
 from rtp_llm.models_py.modules.dsv41.fp8._v41_prefill_indexer import PrefillIndexerKeys
 
 MAX_CHUNK_ROWS = 4096
@@ -231,7 +232,9 @@ def _prepare_sparse_prefill_plan_kernel(
     LOOKUP: tl.constexpr = False,
     REQUESTS=0,
     POSITIONS_RATIO: tl.constexpr = 0,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     row = tl.program_id(0).to(tl.int64)
     column = tl.arange(0, K)
     candidate = tl.load(candidates + row * CANDIDATE_STRIDE + column)
@@ -418,6 +421,7 @@ def prepare_plan(
             )
         ),
         num_warps=16 if count >= 1024 else 4,
+        **launch_options(candidates),
     )
     # The pinned DeepGEMM non-paged metadata ABI uses (ke - ks) ONLY to
     # derive ceil_div(compact_length, BLOCK). Actual K addresses come from
@@ -500,7 +504,9 @@ def _remap_sparse_prefill_topk_kernel(
     TILE: tl.constexpr,
     key_offsets=None,
     BATCHED: tl.constexpr = False,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     row = tl.program_id(0).to(tl.int64)
     slot = tl.arange(0, TILE)
     column = tl.load(columns + row * COLUMN_STRIDE + slot, slot < TOPK, other=-1)
@@ -586,6 +592,7 @@ def remap(
             if plan.row_key_offsets is not None
             else {}
         ),
+        **launch_options(columns),
     )
     return out
 

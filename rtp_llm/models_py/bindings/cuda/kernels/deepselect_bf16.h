@@ -17,7 +17,10 @@ bool deepselect_bf16_available();
 // followed by -1. Long rows containing NaN are entirely -1; this deliberately
 // differs from torch.topk's NaN ordering. The caller filters selected +/-inf
 // and short-row NaN in its fused remapping kernel.
-void deepselect_bf16(const torch::Tensor& logits, const torch::Tensor& ends, torch::Tensor& output);
+void deepselect_bf16(const torch::Tensor& logits,
+                     const torch::Tensor& ends,
+                     torch::Tensor&       output,
+                     bool                 enable_pdl = false);
 
 // Dense token K512 with the same storage/bounds contract as above. NaN ranks
 // like +inf instead of invalidating the whole row. When filter_finite is true,
@@ -26,6 +29,7 @@ void deepselect_bf16(const torch::Tensor& logits, const torch::Tensor& ends, tor
 void deepselect_bf16_dense(const torch::Tensor& logits,
                            const torch::Tensor& ends,
                            torch::Tensor&       output,
-                           bool                 filter_finite);
+                           bool                 filter_finite,
+                           bool                 enable_pdl = false);
 
 }  // namespace torch_ext

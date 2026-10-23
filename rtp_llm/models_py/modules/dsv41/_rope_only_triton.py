@@ -14,6 +14,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41._pdl import launch_options, pdl_sync
+
 _DEFAULT_GROUP_HEADS = 8
 
 
@@ -29,7 +31,9 @@ def _rope_only_kernel(
     RD_HALF: tl.constexpr,
     INVERSE: tl.constexpr,
     BLOCK_RD_HALF: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     pid = tl.program_id(0).to(tl.int64)
     freq_idx = pid // freq_stride_n
     pair_off = tl.arange(0, BLOCK_RD_HALF)
@@ -66,7 +70,9 @@ def _rope_only_group_heads_kernel(
     INVERSE: tl.constexpr,
     BLOCK_RD_HALF: tl.constexpr,
     GROUP_HEADS: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     freq_idx = tl.program_id(0).to(tl.int64)
     head_tile = tl.program_id(1).to(tl.int64)
     row_start = freq_idx * freq_stride_n + head_tile * GROUP_HEADS
@@ -153,6 +159,7 @@ def rope_only_inplace(
             BLOCK_RD_HALF=block_half,
             GROUP_HEADS=selected_group_heads,
             num_warps=4,
+            **launch_options(x),
         )
     else:
         _rope_only_kernel[(N,)](
@@ -167,5 +174,6 @@ def rope_only_inplace(
             INVERSE=inverse,
             BLOCK_RD_HALF=block_half,
             num_warps=4,
+            **launch_options(x),
         )
     return x

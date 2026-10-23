@@ -45,6 +45,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41._pdl import launch_options, pdl_sync
+
 
 @triton.jit(do_not_specialize=["M", "output_scale_stride_k"])
 def _silu_mul_fp8_quant_packed_kernel(
@@ -63,7 +65,9 @@ def _silu_mul_fp8_quant_packed_kernel(
     GROUP_SIZE: tl.constexpr,
     BLOCK_M: tl.constexpr,
     HAS_CLAMP: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     N_2: tl.constexpr = N // 2
 
     pid_pack = tl.program_id(0).to(tl.int64)  # which packed-int32 column (= 4 groups)
@@ -156,7 +160,9 @@ def _silu_mul_fp8_quant_packed_split_kernel(
     GROUP_SIZE: tl.constexpr,
     BLOCK_M: tl.constexpr,
     HAS_CLAMP: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     pid_pack = tl.program_id(0).to(tl.int64)
     pid_m = tl.program_id(1).to(tl.int64)
     m_offset = pid_m * BLOCK_M
@@ -286,6 +292,7 @@ def silu_mul_fp8_quant_packed(
         HAS_CLAMP=has_clamp,
         num_warps=num_warps,
         num_stages=num_stages,
+        **launch_options(gate_up),
     )
 
     return output_q, output_scale_packed
@@ -350,6 +357,7 @@ def silu_mul_fp8_quant_packed_from_parts(
         HAS_CLAMP=has_clamp,
         num_warps=max(4, group_size // 32),
         num_stages=2,
+        **launch_options(gate),
     )
 
     return output_q, output_scale_packed

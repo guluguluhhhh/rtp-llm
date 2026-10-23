@@ -80,6 +80,12 @@ class AutoLegacyQuantDispatchTest(unittest.TestCase):
             with self.subTest(cc=cc):
                 self.assertEqual(self.dispatch(m=65536, cc=cc)[0], ["v3"])
 
+    def test_v3_pdl_is_explicit_opt_in(self):
+        self.dispatch()
+        self.assertFalse(self.calls["v3"].call_args.kwargs["enable_pdl"])
+        self.dispatch(enable_pdl=True)
+        self.assertTrue(self.calls["v3"].call_args.kwargs["enable_pdl"])
+
     def test_auto_fallback_keeps_legacy_at_large_m(self):
         for overrides in (
             dict(k=96),
@@ -146,6 +152,7 @@ class V41ProducerPolicyTest(unittest.TestCase):
             is_supported=lambda *args: True,
             triton=SimpleNamespace(cdiv=lambda a, b: (a + b - 1) // b),
             _v41_norm_quant_kernel=Kernel(),
+            launch_options=lambda tensor: {"USE_PDL": False},
         )
         for m in (819, 820):
             x = torch.empty(m, 5120, dtype=torch.bfloat16)

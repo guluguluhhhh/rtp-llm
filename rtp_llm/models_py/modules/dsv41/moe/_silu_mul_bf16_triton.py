@@ -37,6 +37,8 @@ from typing import Optional, Tuple
 
 import torch
 
+from rtp_llm.models_py.modules.dsv41._pdl import launch_options, pdl_sync
+
 try:
     import triton
     import triton.language as tl
@@ -56,7 +58,9 @@ if triton is not None:
         APPLY_CLAMP: tl.constexpr,  # bool
         CLAMP_LIMIT: tl.constexpr,  # float; ignored when APPLY_CLAMP is False
         BLOCK_N: tl.constexpr,
+        USE_PDL: tl.constexpr = False,
     ):
+        pdl_sync(USE_PDL)
         pid_m = tl.program_id(axis=0).to(tl.int64)
         pid_n = tl.program_id(axis=1).to(tl.int64)
         if pid_m >= M:
@@ -105,7 +109,9 @@ if triton is not None:
         APPLY_CLAMP: tl.constexpr,
         CLAMP_LIMIT: tl.constexpr,
         BLOCK_N: tl.constexpr,
+        USE_PDL: tl.constexpr = False,
     ):
+        pdl_sync(USE_PDL)
         GROUPS: tl.constexpr = BLOCK_N // 32
         PACKS: tl.constexpr = GROUPS // 4
         pid_m = tl.program_id(0).to(tl.int64)
@@ -180,6 +186,7 @@ def silu_mul_split_bf16(
         CLAMP_LIMIT=float(clamp_limit) if apply_clamp else 0.0,
         BLOCK_N=block_n,
         num_warps=8,
+        **launch_options(gate_up),
     )
     return out
 
@@ -220,5 +227,6 @@ def silu_mul_fp8_g32_quant(
         BLOCK_N=1024,
         num_warps=8,
         enable_fp_fusion=False,
+        **launch_options(gate_up),
     )
     return quant, scales

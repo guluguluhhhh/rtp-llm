@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import torch
 
+from rtp_llm.models_py.modules.dsv41._pdl import launch_options, pdl_sync
+
 try:
     import triton
     import triton.language as tl
@@ -31,6 +33,7 @@ if triton is not None:
         destination_stride_m,
         destination_stride_k,
         BLOCK_ROWS: tl.constexpr,
+        USE_PDL: tl.constexpr = False,
     ):
         # One program per BLOCK_ROWS DESTINATION rows: each padded UTCCP row is
         # mapped back to its source row, so the kernel writes every active row
@@ -46,6 +49,7 @@ if triton is not None:
         # [0, block_m) or beyond `tokens` are padding and store zero. The grid
         # covers `active_rows` exactly (a multiple of aligned_block_m, hence of
         # BLOCK_ROWS=128), so the store needs no bounds mask.
+        pdl_sync(USE_PDL)
         d_rows = tl.program_id(0).to(tl.int64) * BLOCK_ROWS + tl.arange(
             0, BLOCK_ROWS
         ).to(tl.int64)
@@ -103,6 +107,7 @@ def stage_mega_moe_se_shared_l1_scales(
         destination.stride(1),
         BLOCK_ROWS=block_rows,
         num_warps=4,
+        **launch_options(source),
     )
 
 

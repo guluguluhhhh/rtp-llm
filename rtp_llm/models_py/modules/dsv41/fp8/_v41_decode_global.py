@@ -19,6 +19,7 @@ import triton
 import triton.language as tl
 import triton.language.extra.cuda.libdevice as libdevice
 
+from rtp_llm.models_py.modules.dsv41._pdl import launch_options, pdl_sync
 from rtp_llm.models_py.modules.dsv41.attn_type import CSA_STATE, INDEXER_KV
 from rtp_llm.models_py.modules.dsv41.fp8._kv_cache_utils import (
     require_pool_tokens_per_block,
@@ -138,7 +139,9 @@ def _compress_norm_main_store_kernel(
     INDEX_TABLE_STRIDE: tl.constexpr,
     STATE_BLOCKS: tl.constexpr,
     TRAP: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     token = tl.program_id(0).to(tl.int64)
     columns = tl.arange(0, 512)
     position = tl.load(positions + token).to(tl.int64)
@@ -265,7 +268,9 @@ def _index_norm_store_state_kernel(
     STATE_BLOCKS: tl.constexpr,
     TRAP: tl.constexpr,
     STATE_ONLY: tl.constexpr = False,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     token = tl.program_id(0).to(tl.int64)
     position = tl.load(positions + token).to(tl.int64)
     request = tl.load(requests + token).to(tl.int64)
@@ -514,6 +519,7 @@ def try_produce_global(attn, x, positions, req_ids, starts) -> bool:
         **state_geometry,
         num_warps=4,
         enable_fp_fusion=False,
+        **launch_options(values),
     )
     native_index = _try_native_indexer_k(
         attn, latent, index_positions, index_slots, index
@@ -547,6 +553,7 @@ def try_produce_global(attn, x, positions, req_ids, starts) -> bool:
         **state_geometry,
         num_warps=4,
         enable_fp_fusion=False,
+        **launch_options(projected),
     )
     return True
 

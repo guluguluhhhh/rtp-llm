@@ -32,6 +32,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41._pdl import launch_options, pdl_sync
+
 INDEXER_HEAD_DIM = 128
 FP8_E4M3_MAX = 448.0
 
@@ -46,9 +48,11 @@ def _indexer_q_fp8_fold_kernel(
     BSH,  # B*S*H — rows
     D: tl.constexpr,  # head_dim = 128
     fp8_max: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
     """One program per (b, s, h) row. Each row is one 128-elem vector;
     fits in registers, no inner-D tiling needed."""
+    pdl_sync(USE_PDL)
     pid = tl.program_id(0).to(tl.int64)
     if pid >= BSH:
         return
@@ -99,6 +103,7 @@ def indexer_q_fp8_quant_fold(
         D=D,
         fp8_max=FP8_E4M3_MAX,
         num_warps=4,
+        **launch_options(q_bf16),
     )
     return q_fp8, w_fold
 
@@ -119,7 +124,9 @@ def _indexer_q_rope_fp8_fold_kernel(
     RD_HALF: tl.constexpr,
     ROPE_START: tl.constexpr,
     fp8_max: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     pid = tl.program_id(0).to(tl.int64)
     if pid >= BSH:
         return
@@ -212,5 +219,6 @@ def indexer_q_rope_fp8_quant_fold(
         ROPE_START=D - rope_head_dim,
         fp8_max=FP8_E4M3_MAX,
         num_warps=4,
+        **launch_options(q_bf16),
     )
     return q_fp8, w_fold

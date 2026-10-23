@@ -24,6 +24,7 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41._pdl import launch_options, pdl_sync
 from rtp_llm.models_py.modules.dsv41.fp8._indexer_quant_triton import (
     INDEXER_ENTRY_BYTES,
     INDEXER_HEAD_DIM,
@@ -46,7 +47,9 @@ def _cp_gather_indexer_k_kernel(
     cache_stride_b: tl.constexpr,
     num_cache_blocks: tl.constexpr,
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     pid = tl.program_id(0).to(tl.int64)
     if pid >= N:
         return
@@ -109,8 +112,10 @@ def _cp_gather_indexer_k_to_padded_kernel(
     SCALE_BYTES: tl.constexpr,
     BATCH_BLOCK: tl.constexpr,
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
     """Read actual CP-owned rows directly into the padded NCCL layout."""
+    pdl_sync(USE_PDL)
     token_idx = tl.program_id(0).to(tl.int64)
     if token_idx >= total_local_tokens:
         return
@@ -269,6 +274,7 @@ def try_gather_indexer_k_to_padded(
         BATCH_BLOCK=batch_block,
         TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
         num_warps=4,
+        **launch_options(kv_cache_packed),
     )
     return True
 
@@ -308,5 +314,6 @@ def gather_indexer_k_for_prefill(
         num_cache_blocks=int(kv_cache_packed.shape[0]),
         TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
         num_warps=4,
+        **launch_options(kv_cache_packed),
     )
     return k_quant, k_scale

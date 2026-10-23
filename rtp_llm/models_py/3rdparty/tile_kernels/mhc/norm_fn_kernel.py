@@ -71,6 +71,7 @@ def _mhc_pre_norm_fn_fwd_mul(
     rms_group_size: int,
     token_block: int = 32,
     hidden_block: int = 256,
+    enable_pdl: bool = False,
 ) -> tilelang.JITKernel:
     assert mhc_mult3 <= 32
     num_tokens = T.dynamic("num_tokens")
@@ -89,6 +90,8 @@ def _mhc_pre_norm_fn_fwd_mul(
             pid_x,
             pid_y,
         ):
+            if enable_pdl:
+                T.pdl_sync()
             out_frag = T.alloc_fragment((token_block, 32), T.float32)
             sqrsum_part = T.alloc_fragment((token_block, 4), T.float32)
             T.clear(out_frag)
@@ -144,6 +147,7 @@ def _mhc_pre_norm_fn_fwd_norm(
     rms_group_size: int,
     rms_eps: float,
     n_splits: int,
+    enable_pdl: bool = False,
 ) -> tilelang.JITKernel:
     num_tokens = T.dynamic("num_tokens")
     n_thr = 32
@@ -159,6 +163,8 @@ def _mhc_pre_norm_fn_fwd_norm(
         out: T.Tensor[(num_tokens, mhc_mult3), T.float32],
     ) -> None:
         with T.Kernel(num_tokens, threads=n_thr) as pid:
+            if enable_pdl:
+                T.pdl_sync()
             rms = T.alloc_fragment(1, T.float32)
             out_l = T.alloc_fragment(mhc_mult3, T.float32)
             out_l0 = T.alloc_fragment(mhc_mult3, T.float32)

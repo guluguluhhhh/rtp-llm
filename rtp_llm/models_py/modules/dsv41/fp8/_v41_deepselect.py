@@ -14,6 +14,7 @@ from functools import lru_cache
 
 import torch
 
+from rtp_llm.models_py.modules.dsv41._pdl import enabled as pdl_enabled
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 
@@ -81,5 +82,5 @@ def try_select_sparse_tokens(
         out = torch.empty(
             (logits.shape[0], 512), dtype=torch.int32, device=logits.device
         )
-    rtp_llm_ops.deepselect_bf16(logits, end, out)
+    rtp_llm_ops.deepselect_bf16(logits, end, out, enable_pdl=pdl_enabled(logits.device))
     return out

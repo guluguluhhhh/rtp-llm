@@ -12,6 +12,8 @@ import os
 
 import torch
 
+from rtp_llm.models_py.modules.dsv41._pdl import launch_options, pdl_sync
+
 try:
     import triton
     import triton.language as tl
@@ -34,7 +36,9 @@ if triton is not None:
         sf_stride_m: tl.constexpr,
         eps: tl.constexpr,
         fp8_max: tl.constexpr,
+        USE_PDL: tl.constexpr = False,
     ):
+        pdl_sync(USE_PDL)
         pid_m = tl.program_id(0).to(tl.int64)
         pid_blk = tl.program_id(1)
         offs = tl.arange(0, 128)
@@ -74,7 +78,9 @@ if triton is not None:
         out_weights_stride_m: tl.constexpr,
         out_indices_stride_m: tl.constexpr,
         BLOCK_K: tl.constexpr,
+        USE_PDL: tl.constexpr = False,
     ):
+        pdl_sync(USE_PDL)
         pid = tl.program_id(0).to(tl.int64)
         offs = tl.arange(0, BLOCK_K)
         mask = (pid < M) & (offs < K)
@@ -110,7 +116,9 @@ if triton is not None:
         fp8_max: tl.constexpr,
         BLOCK_M: tl.constexpr,
         BLOCK_K: tl.constexpr,
+        USE_PDL: tl.constexpr = False,
     ):
+        pdl_sync(USE_PDL)
         pid_m_blk = tl.program_id(0).to(tl.int64)
         pid_blk = tl.program_id(1)
 
@@ -208,6 +216,7 @@ def fused_pack_mega_moe_inputs_legacy(
         1.0e-4,
         fp8_max,
         num_warps=4,
+        **launch_options(x),
     )
     block_k = triton.next_power_of_2(topk)
     _pack_router_kernel[(T,)](
@@ -223,6 +232,7 @@ def fused_pack_mega_moe_inputs_legacy(
         out_indices.stride(0),
         BLOCK_K=block_k,
         num_warps=1,
+        **launch_options(weights),
     )
 
 
@@ -275,6 +285,7 @@ def fused_pack_mega_moe_inputs_optimized(
         BLOCK_M=block_m,
         BLOCK_K=block_k,
         num_warps=num_warps,
+        **launch_options(x),
     )
 
 

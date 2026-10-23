@@ -38,7 +38,8 @@ template<bool DENSE>
 void deepselect_bf16_impl(const torch::Tensor& logits,
                           const torch::Tensor& ends,
                           torch::Tensor&       output,
-                          bool                 filter_finite) {
+                          bool                 filter_finite,
+                          bool                 enable_pdl) {
 #if defined(RTP_DEEPSELECT_BF16_ENABLED) && !defined(USE_ROCM)
     TORCH_CHECK(logits.is_cuda() && ends.is_cuda() && output.is_cuda(), "DeepSelect requires CUDA tensors");
     TORCH_CHECK(logits.device() == ends.device() && logits.device() == output.device(),
@@ -105,7 +106,7 @@ void deepselect_bf16_impl(const torch::Tensor& logits,
                                             1,
                                             DENSE,
                                             FILTER_FINITE>;
-            topk_select_bf16_normal::run_topk_select_kernel<Config>(args);
+            topk_select_bf16_normal::run_topk_select_kernel<Config>(args, enable_pdl);
         } else {
             using Config = TopkSelectConfig<nv_bfloat16,
                                             int32_t,
@@ -122,7 +123,7 @@ void deepselect_bf16_impl(const torch::Tensor& logits,
                                             1,
                                             DENSE,
                                             FILTER_FINITE>;
-            topk_select_bf16_normal::run_topk_select_kernel<Config>(args);
+            topk_select_bf16_normal::run_topk_select_kernel<Config>(args, enable_pdl);
         }
     };
     if constexpr (DENSE) {
@@ -142,15 +143,16 @@ void deepselect_bf16_impl(const torch::Tensor& logits,
 
 }  // namespace
 
-void deepselect_bf16(const torch::Tensor& logits, const torch::Tensor& ends, torch::Tensor& output) {
-    deepselect_bf16_impl<false>(logits, ends, output, false);
+void deepselect_bf16(const torch::Tensor& logits, const torch::Tensor& ends, torch::Tensor& output, bool enable_pdl) {
+    deepselect_bf16_impl<false>(logits, ends, output, false, enable_pdl);
 }
 
 void deepselect_bf16_dense(const torch::Tensor& logits,
                            const torch::Tensor& ends,
                            torch::Tensor&       output,
-                           bool                 filter_finite) {
-    deepselect_bf16_impl<true>(logits, ends, output, filter_finite);
+                           bool                 filter_finite,
+                           bool                 enable_pdl) {
+    deepselect_bf16_impl<true>(logits, ends, output, filter_finite, enable_pdl);
 }
 
 }  // namespace torch_ext

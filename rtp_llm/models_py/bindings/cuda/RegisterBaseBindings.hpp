@@ -43,7 +43,8 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   "V4.1 BF16 group32 E4M3 quantization with packed UE8M0 scales",
                   py::arg("input"),
                   py::arg("output_q"),
-                  py::arg("output_s"));
+                  py::arg("output_s"),
+                  py::arg("enable_pdl") = false);
     rtp_ops_m.def("debug_kernel",
                   &debugKernel,
                   "Debug kernel to print 2D data blocks from GPU tensor",
@@ -292,8 +293,14 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("logits"),
                   py::arg("ends"),
                   py::arg("output"),
-                  py::arg("filter_finite") = true);
-    rtp_ops_m.def("deepselect_bf16", &deepselect_bf16, py::arg("logits"), py::arg("ends"), py::arg("output"));
+                  py::arg("filter_finite") = true,
+                  py::arg("enable_pdl")    = false);
+    rtp_ops_m.def("deepselect_bf16",
+                  &deepselect_bf16,
+                  py::arg("logits"),
+                  py::arg("ends"),
+                  py::arg("output"),
+                  py::arg("enable_pdl") = false);
     rtp_ops_m.def("dsv4_top_k_per_row_prefill",
                   &dsv4_top_k_per_row_prefill,
                   "Per-row TopK for DSv4 indexer prefill",

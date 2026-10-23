@@ -7,6 +7,8 @@ import torch
 try:
     import triton
     import triton.language as tl
+
+    from rtp_llm.models_py.modules.dsv41._pdl import launch_options, pdl_sync
 except ModuleNotFoundError as error:
     if error.name not in ("triton", "triton.language"):
         raise
@@ -260,7 +262,9 @@ if triton is not None:
         S: tl.constexpr,
         RATIO: tl.constexpr,
         TILE_ROWS: tl.constexpr,
+        USE_PDL: tl.constexpr = False,
     ):
+        pdl_sync(USE_PDL)
         ids = tl.arange(0, 128)
         prefix = tl.load(starts + ids * SS, ids < BATCH, other=0).to(tl.int64)
         size = tl.load(lengths + ids * LS, ids < BATCH, other=0).to(tl.int64)
@@ -409,7 +413,9 @@ if triton is not None:
         LS,
         RATIO: tl.constexpr,
         TILE_ROWS: tl.constexpr,
+        USE_PDL: tl.constexpr = False,
     ):
+        pdl_sync(USE_PDL)
         ids = tl.arange(0, 128)
         prefix = tl.load(starts + ids * SS, ids < BATCH, other=0).to(tl.int64)
         size = tl.load(lengths + ids * LS, ids < BATCH, other=0).to(tl.int64)
@@ -544,6 +550,7 @@ def prepare_raw(
         ratio,
         tile_rows,
         num_warps=4,
+        **launch_options(positions),
     )
     # Empty compact output is valid (e.g. all length-one even-prefix requests).
     # The existing slot fast path rejects empty vectors, so avoid calling it.
@@ -643,6 +650,7 @@ def _prepare_fused_raw(
         ratio,
         tile_rows,
         num_warps=4,
+        **launch_options(positions),
     )
     return ProducerMetadata(
         segments,

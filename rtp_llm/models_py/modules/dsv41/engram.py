@@ -38,6 +38,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from rtp_llm.models_py.modules.dsv41._pdl import launch_options
+
 logger = logging.getLogger(__name__)
 DEAD_ID = -1
 
@@ -764,6 +766,7 @@ def gated_engram_residual(
             EPS=eps,
             BLOCK=8192,
             enable_fp_fusion=False,
+            **launch_options(hidden),
         )
         return out
     tokens, copies, dim = hidden.shape

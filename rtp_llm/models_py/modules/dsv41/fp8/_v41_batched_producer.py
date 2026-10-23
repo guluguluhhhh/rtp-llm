@@ -27,6 +27,7 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41._pdl import launch_options, pdl_sync
 from rtp_llm.models_py.modules.dsv41.attn_type import CSA_STATE, INDEXER_KV
 from rtp_llm.models_py.modules.dsv41.fp8 import _v41_prefill_global as legacy
 from rtp_llm.models_py.modules.dsv41.fp8._kv_cache_utils import (
@@ -355,8 +356,14 @@ def state_slots_are_unique(
 
 @triton.jit
 def _prepare_kernel(
-    descriptors, boundaries, widths, RATIO: tl.constexpr, BLOCK: tl.constexpr
+    descriptors,
+    boundaries,
+    widths,
+    RATIO: tl.constexpr,
+    BLOCK: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     segment = tl.program_id(1)
     start = tl.load(descriptors + segment * 5)
     first = tl.load(descriptors + segment * 5 + 1)
@@ -388,7 +395,12 @@ def prepare(plan, device):
         )
         maximum = max(stop - first for _, _, first, stop, _ in plan.segments)
         _prepare_kernel[(triton.cdiv(maximum, 256), len(plan.segments))](
-            descriptors_device, boundaries, widths, plan.ratio, 256
+            descriptors_device,
+            boundaries,
+            widths,
+            plan.ratio,
+            256,
+            **launch_options(descriptors_device),
         )
     return PreparedPlan(plan, boundaries, widths)
 
@@ -417,7 +429,9 @@ def _compress_kernel(
     POOL_STRIDE,
     BLOCKS,
     TRAP: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     width = tl.load(widths + tl.program_id(0))
     # The callee sees the same compact row program_id. Only its reduction
     # partition varies; values/boundaries address the whole immutable group.
@@ -524,6 +538,7 @@ def compress_main(
             legacy.trap_invalid_kv_access_enabled(),
             num_warps=4,
             enable_fp_fusion=False,
+            **launch_options(values),
         )
     return output
 
@@ -555,7 +570,10 @@ def store_index(projected, norm, eps, positions, freqs, index_pool, index_slots,
 
 
 @triton.jit(do_not_specialize=["COUNT", "SEND_STRIDE"])
-def _pack_projected_kernel(table, send, COUNT, SEND_STRIDE, BLOCK: tl.constexpr):
+def _pack_projected_kernel(
+    table, send, COUNT, SEND_STRIDE, BLOCK: tl.constexpr, USE_PDL: tl.constexpr = False
+):
+    pdl_sync(USE_PDL)
     task = tl.program_id(0)
     # Prefix tile counts schedule only useful work for skewed segment lengths.
     lo, hi = tl.full((), 0, tl.int32), COUNT
@@ -658,7 +676,13 @@ def pack_projected_group(send, projections, offsets, columns):
     )
     table = host.to(send.device, non_blocking=True)
     _pack_projected_kernel[(tile_count,)](
-        table, send, count, send_stride, 2048, num_warps=4
+        table,
+        send,
+        count,
+        send_stride,
+        2048,
+        num_warps=4,
+        **launch_options(table),
     )
     stream = torch.cuda.current_stream(send.device)
     for source in projections:
@@ -694,7 +718,9 @@ def _restore_projected_kernel(
     WIDTH: tl.constexpr,
     CP_SIZE: tl.constexpr,
     BLOCK: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     element = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
     row, column = element // WIDTH, element % WIDTH
     valid = row < REAL_ROWS
@@ -797,6 +823,7 @@ def restore_projected_group(
             cp_size,
             2048,
             num_warps=4,
+            **launch_options(gathered),
         )
         stream = torch.cuda.current_stream(device)
         for tensor in (gathered, unpad_restore, out):

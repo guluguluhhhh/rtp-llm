@@ -59,6 +59,7 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41._pdl import launch_options, pdl_sync
 from rtp_llm.models_py.modules.dsv41.fp8._trap_utils import (
     trap_invalid_kv_access_enabled,
 )
@@ -100,7 +101,9 @@ def _save_partial_states_kernel(
     STATE_WIDTH: tl.constexpr,
     COMPRESS_RATIO: tl.constexpr,
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     token_idx = tl.program_id(0).to(tl.int64)
     slot_id = tl.load(slot_mapping_ptr + token_idx)
     if slot_id < 0:
@@ -202,7 +205,9 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     BATCHED: tl.constexpr,
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
     STATE_RING_ENTRIES: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     token_idx = tl.program_id(0).to(tl.int64)
 
     position = tl.load(positions_ptr + token_idx).to(tl.int64)
@@ -476,7 +481,9 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
     BATCHED: tl.constexpr,
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
     STATE_RING_ENTRIES: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     token_idx = tl.program_id(0).to(tl.int64)
 
     position = tl.load(positions_ptr + token_idx).to(tl.int64)
@@ -734,6 +741,7 @@ def run_save_partial_states(
         STATE_WIDTH=state_width,
         COMPRESS_RATIO=compress_ratio,
         TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
+        **launch_options(kv),
     )
 
 
@@ -864,6 +872,7 @@ def run_fused_compress_kv_write(
         TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
         STATE_RING_ENTRIES=state_ring_entries,
         num_warps=_fused_num_warps(head_dim, compress_ratio, cfg),
+        **launch_options(state_cache),
     )
 
 

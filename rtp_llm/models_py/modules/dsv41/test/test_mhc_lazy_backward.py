@@ -350,10 +350,10 @@ class MHCLazyBackwardTest(unittest.TestCase):
                 )
                 torch.testing.assert_close(actual, expected, rtol=1e-4, atol=1e-5)
                 op._mhc_pre_norm_fn_fwd_mul.assert_called_once_with(
-                    24, splits, hidden // splits
+                    24, splits, hidden // splits, enable_pdl=False
                 )
                 op._mhc_pre_norm_fn_fwd_norm.assert_called_once_with(
-                    24, 1, hidden, 1e-6, splits
+                    24, 1, hidden, 1e-6, splits, enable_pdl=False
                 )
 
     def test_fused_tilelang_backend_stays_single_split(self):
@@ -376,7 +376,9 @@ class MHCLazyBackwardTest(unittest.TestCase):
             ),
             1,
         )
-        norm._mhc_pre_norm_fn_fwd_mul.assert_called_once_with(24, 1, 20480)
+        norm._mhc_pre_norm_fn_fwd_mul.assert_called_once_with(
+            24, 1, 20480, enable_pdl=False
+        )
         self.assertEqual(mul.call_args.args[2].shape, (1, 192, 24))
         self.assertEqual(mul.call_args.args[3].shape, (1, 192))
         self.assertEqual(mul.call_args.args[2].data_ptr(), partial.data_ptr())
@@ -481,12 +483,18 @@ class MHCLazyBackwardTest(unittest.TestCase):
             for tokens in (1, 7, 32):
                 x = torch.randn(tokens, 4, 4).transpose(-1, -2)
                 torch.testing.assert_close(op.sinkhorn_normalize(x, 20, 1e-5), x)
-            op._mhc_sinkhorn_fwd.assert_called_once_with(4, 1, 20, 1e-5)
+            op._mhc_sinkhorn_fwd.assert_called_once_with(
+                4, 1, 20, 1e-5, enable_pdl=False
+            )
             op.sinkhorn_normalize(torch.randn(2, 4, 4), 10, 1e-5)
             op.sinkhorn_normalize(torch.randn(2, 4, 4), 20, 1e-6)
             op.sinkhorn_normalize(torch.randn(2, 2, 2), 20, 1e-5)
             op._inference_kernel(torch.device("cpu", 0), 4, 20, 1e-5)
             self.assertEqual(op._mhc_sinkhorn_fwd.call_count, 5)
+            for _ in range(2):
+                op.sinkhorn_normalize(torch.randn(2, 4, 4), 20, 1e-5, enable_pdl=True)
+            op._mhc_sinkhorn_fwd.assert_called_with(4, 1, 20, 1e-5, enable_pdl=True)
+            self.assertEqual(op._mhc_sinkhorn_fwd.call_count, 6)
 
     def test_compile_retains_autograd_dispatch(self):
         op, _ = self.load_op("sinkhorn", Mock(), Mock())

@@ -49,13 +49,15 @@ public:
     static constexpr bool HAS_PARTIAL_ROUNDS = NUM_SEGS_PER_ROUND > NUM_TAIL_SEGS;
     struct SharedMemoryPlan: SharedMemoryPlanBase {};
 
-    static __device__ __forceinline__ void topk_select_kernel_devfunc(const TopkSelectArgs& args,
-                                                                      const TmaParams&      tma_params) {
+    static __device__ __forceinline__ void
+    topk_select_kernel_devfunc(const TopkSelectArgs& args, const TmaParams& tma_params, bool enable_pdl) {
         uint32_t batch_idx = blockIdx.x;
         // RTP: clamp signed bounds before conversion; the sparse plan normally
         // already produces valid bounds, but the native API is safe for any int32.
-        int32_t requested_end =
-            args.end_ptr == nullptr ? static_cast<int32_t>(args.vocab_size) : __ldg(args.end_ptr + batch_idx);
+        // PDL consumers must not use the noncoherent read-only cache.
+        int32_t  requested_end = args.end_ptr == nullptr ?
+                                     static_cast<int32_t>(args.vocab_size) :
+                                     (enable_pdl ? __ldca(args.end_ptr + batch_idx) : __ldg(args.end_ptr + batch_idx));
         uint32_t end_vocab_idx = requested_end <= 0 ? 0u : min(static_cast<uint32_t>(requested_end), args.vocab_size);
 
         extern __shared__ CUTE_ALIGNAS(1024) char wksp_buf[];
@@ -75,7 +77,10 @@ public:
                     bool valid = slot < end_vocab_idx;
                     if constexpr (Config::filter_finite) {
                         if (valid) {
-                            valid = (__bfloat16_as_ushort(__ldg(input + slot)) & 0x7fffu) < 0x7f80u;
+                            const auto bits = enable_pdl ?
+                                                  __ldca(reinterpret_cast<const unsigned short*>(input + slot)) :
+                                                  __bfloat16_as_ushort(__ldg(input + slot));
+                            valid           = (bits & 0x7fffu) < 0x7f80u;
                         }
                     }
                     output[slot] = valid ? static_cast<OutIdxT>(slot) : static_cast<OutIdxT>(-1);
@@ -175,12 +180,18 @@ public:
 template<typename Kernel>
 __launch_bounds__(Kernel::NUM_THREADS, Kernel::TARGET_OCCUPANCY, 1) __global__
     void topk_kernel(__grid_constant__ const TopkSelectArgs             args,
-                     __grid_constant__ const typename Kernel::TmaParams tma_params) {
-    Kernel::topk_select_kernel_devfunc(args, tma_params);
+                     __grid_constant__ const typename Kernel::TmaParams tma_params,
+                     bool                                               enable_pdl) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+    if (enable_pdl) {
+        cudaGridDependencySynchronize();
+    }
+#endif
+    Kernel::topk_select_kernel_devfunc(args, tma_params, enable_pdl);
 }
 
 template<typename Config>
-void run_topk_select_kernel(const TopkSelectArgs& args) {
+void run_topk_select_kernel(const TopkSelectArgs& args, bool enable_pdl = false) {
     KU_ASSERT(args.sorted_value == Config::sorted_value, "Dispatch failure");
     KU_ASSERT(args.sorted_index == Config::sorted_index, "Dispatch failure");
     KU_ASSERT(args.return_value == Config::return_value, "Dispatch failure");
@@ -199,10 +210,13 @@ void run_topk_select_kernel(const TopkSelectArgs& args) {
     KU_ASSERT(args.stride_input_batch % 8 == 0, "stride_input_batch must be 16B-aligned");
     typename Kernel::TmaParams tma_params = {Kernel::make_topk_tensor_map(args)};
 
-    ku::launch_kernel(ku::KernelLaunchConfig{dim3(args.batch_size), dim3(Kernel::NUM_THREADS), smem_size, args.stream},
-                      kernel,
-                      args,
-                      tma_params);
+    ku::launch_kernel(
+        ku::KernelLaunchConfig{
+            dim3(args.batch_size), dim3(Kernel::NUM_THREADS), smem_size, args.stream, dim3(1, 1, 1), enable_pdl},
+        kernel,
+        args,
+        tma_params,
+        enable_pdl);
 }
 
 }  // namespace topk_select_bf16_normal

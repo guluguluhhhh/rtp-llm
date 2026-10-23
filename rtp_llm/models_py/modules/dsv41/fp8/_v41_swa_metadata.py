@@ -5,6 +5,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41._pdl import launch_options, pdl_sync
+
 from ._swa_cp_byte_sliced import CPByteSlicedSlotCompaction
 
 
@@ -34,7 +36,9 @@ def _planned_slots(
     ring,
     READ: tl.constexpr,
     BLOCK: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     req = tl.program_id(0)
     row = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
     prefix = tl.load(prefixes + req).to(tl.int64)
@@ -93,8 +97,10 @@ def _planned_position_slots(
     entries,
     span,
     BLOCK: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
     """Draft CP rows retain the gathered rank order, including padding."""
+    pdl_sync(USE_PDL)
     row = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     request = tl.load(requests + row, mask=row < rows, other=-1).to(tl.int64)
     position = tl.load(positions + row, mask=row < rows, other=-1).to(tl.int64)
@@ -268,6 +274,7 @@ def try_host_slot_metadata(
             span,
             BLOCK=256,
             num_warps=4,
+            **launch_options(table),
         )
     elif max_rows and not positional:
         lookup = mapping.to(table.device, non_blocking=True)
@@ -287,6 +294,7 @@ def try_host_slot_metadata(
             READ=read,
             BLOCK=256,
             num_warps=4,
+            **launch_options(table),
         )
     contiguous = (
         unique[0]
@@ -311,7 +319,9 @@ def _suffix_slots(
     span,
     ring,
     BLOCK: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     req = tl.program_id(0)
     col = tl.arange(0, BLOCK)
     length = tl.load(lengths + req).to(tl.int64)
@@ -372,5 +382,6 @@ def try_suffix_slots(table, seq, lengths, *, max_gather, entries, span, ring):
             ring,
             BLOCK=128,
             num_warps=4,
+            **launch_options(table),
         )
     return output

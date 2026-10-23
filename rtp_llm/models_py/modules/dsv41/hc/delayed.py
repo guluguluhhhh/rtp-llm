@@ -18,6 +18,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from rtp_llm.models_py.modules.dsv41._pdl import enabled as pdl_enabled
 from rtp_llm.models_py.modules.dsv41.hc.base import HCUnitBase
 from rtp_llm.models_py.modules.dsv41.hc.fallback_impl import _hc_split_sinkhorn
 from rtp_llm.models_py.modules.dsv41.hc.tilelang_impl import TileLangHCUnit
@@ -41,6 +42,7 @@ def collapse_delayed(x: torch.Tensor, pre_mix: torch.Tensor) -> torch.Tensor:
         return ops.mhc_pre_apply_mix(
             x.reshape(1, -1, shape[-2], shape[-1]),
             pre_mix.reshape(1, -1, shape[-2], 1).contiguous(),
+            enable_pdl=pdl_enabled(x.device),
         ).reshape(*shape[:-2], shape[-1])
     return (x.float() * pre_mix.unsqueeze(-1)).sum(dim=-2).to(x.dtype)
 
@@ -116,6 +118,7 @@ class DelayedHCUnit(HCUnitBase):
                     sinkhorn_repeat=self.hc_sinkhorn_iters,
                     previous_pre_mix=previous.pre_mix_out,
                     gemm_backend="deepgemm" if use_deepgemm else None,
+                    enable_pdl=pdl_enabled(x.device),
                 )
                 self.pre_mix_out = pre.reshape(*shape[:-1])
                 return (
@@ -126,13 +129,27 @@ class DelayedHCUnit(HCUnitBase):
             mixes = prenorm(residual, self.fn, self.norm_eps)
             if mixes is None:
                 mixes = ops.mhc_pre_norm_fn(
-                    residual, self.fn, None, self.norm_eps, n_splits=1
+                    residual,
+                    self.fn,
+                    None,
+                    self.norm_eps,
+                    n_splits=1,
+                    enable_pdl=pdl_enabled(x.device),
                 )
             pre, post, comb = ops.mhc_pre_split_mixes(
-                mixes, self.scale, self.base, self.hc_mult, 2.0, self.hc_eps
+                mixes,
+                self.scale,
+                self.base,
+                self.hc_mult,
+                2.0,
+                self.hc_eps,
+                enable_pdl=pdl_enabled(x.device),
             )
             comb = ops.sinkhorn_normalize(
-                comb, repeat=self.hc_sinkhorn_iters, eps=self.hc_eps
+                comb,
+                repeat=self.hc_sinkhorn_iters,
+                eps=self.hc_eps,
+                enable_pdl=pdl_enabled(x.device),
             )
             self.pre_mix_out = pre.reshape(*shape[:-1]).contiguous()
             post = post.reshape(*shape[:-1], 1)

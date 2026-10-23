@@ -11,6 +11,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41._pdl import launch_options, pdl_sync
+
 
 def _integer_vector(value, rows, device):
     return (
@@ -42,7 +44,9 @@ def _chunk_metadata_kernel(
     REPLAY: tl.constexpr,
     COMPACT_REPLAY: tl.constexpr,
     PHYSICAL_OFFSETS: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     index = tl.arange(0, 128)
     prefix = tl.load(prefixes + index * PS, index < BATCH, other=0).to(tl.int64)
     length = tl.load(lengths + index * LS, index < BATCH, other=0).to(tl.int64)
@@ -136,6 +140,7 @@ def try_chunk_metadata(
             compact_replay,
             physical_offsets is not None,
             num_warps=4,
+            **launch_options(prefixes),
         )
     return output.unbind(0)
 
@@ -163,7 +168,9 @@ def _prefill_slots_kernel(
     STATE: tl.constexpr,
     HAS_ENDS: tl.constexpr,
     TILE: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     row = tl.program_id(0) * TILE + tl.arange(0, TILE)
     pos = tl.load(positions + row * POS_STRIDE, row < ROWS, other=0).to(tl.int64)
     req = tl.load(requests + row * REQ_STRIDE, row < ROWS, other=0).to(tl.int64)
@@ -256,6 +263,7 @@ def try_slot_mapping(
         state,
         seq_ends is not None,
         256,
+        **launch_options(positions),
     )
     return out
 
@@ -269,7 +277,9 @@ def _prefill_bounds_kernel(
     WIDTH,
     RATIO: tl.constexpr,
     TILE: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     row = tl.program_id(0) * TILE + tl.arange(0, TILE)
     pos = tl.load(positions + row * STRIDE, row < ROWS, other=-1).to(tl.int64)
     length = tl.minimum(tl.maximum(pos + 1, 0) // RATIO, WIDTH).to(tl.int32)
@@ -300,5 +310,6 @@ def try_score_bounds(positions, width, ratio):
         width,
         ratio,
         256,
+        **launch_options(positions),
     )
     return bounds.unbind(0)

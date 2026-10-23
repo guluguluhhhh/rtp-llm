@@ -9,6 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41._pdl import launch_options, pdl_sync
 from rtp_llm.models_py.modules.dsv41.fp8._trap_utils import (
     trap_invalid_kv_access_enabled,
 )
@@ -53,7 +54,9 @@ def _fused_qkv_rope_cache_kernel(
     APPLY_Q_ROPE: tl.constexpr,
     PADDED_HEADS: tl.constexpr,
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     row = tl.program_id(0).to(tl.int64)
     tile = tl.program_id(1).to(tl.int64)
     pair = tl.arange(0, 32)
@@ -288,5 +291,6 @@ def try_fused_qkv_rope_cache(
             PADDED_HEADS=padded_heads,
             TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
             num_warps=4,
+            **launch_options(q),
         )
     return FusedQKVRopeCache(q_out, kv_out, freqs_cis)

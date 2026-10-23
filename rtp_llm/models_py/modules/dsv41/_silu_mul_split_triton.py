@@ -29,6 +29,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41._pdl import launch_options, pdl_sync
+
 
 @triton.jit
 def _silu_mul_split_kernel(
@@ -41,8 +43,10 @@ def _silu_mul_split_kernel(
     CLAMP_LIMIT: tl.constexpr,  # float; <= 0 disables the clamp branch
     APPLY_CLAMP: tl.constexpr,  # bool
     BLOCK_D: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
     """One program per (row, D-block).  Streams D in BLOCK_D-wide tiles."""
+    pdl_sync(USE_PDL)
     pid_n = tl.program_id(axis=0).to(tl.int64)
     pid_d = tl.program_id(axis=1).to(tl.int64)
     if pid_n >= N:
@@ -114,5 +118,6 @@ def silu_mul_split(
         BLOCK_D=BLOCK_D,
         num_warps=4,
         num_stages=2,
+        **launch_options(g_flat),
     )
     return out

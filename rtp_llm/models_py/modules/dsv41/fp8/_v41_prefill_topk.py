@@ -12,6 +12,7 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41._pdl import launch_options, pdl_sync
 from rtp_llm.models_py.modules.dsv41.fp8.indexer import _TOPK_V3_OK, _get_topk_workspace
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
@@ -51,7 +52,9 @@ def _prefill_topk_bounds_kernel(
     WIDTH,
     VISIBLE_STRIDE: tl.constexpr,
     TILE: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     rows = tl.program_id(0) * TILE + tl.arange(0, TILE)
     length = tl.load(visible + rows * VISIBLE_STRIDE, rows < ROWS, other=0)
     # Clamp in the input integer dtype before converting int64 positions.
@@ -66,7 +69,9 @@ def _prefill_topk_finite_kernel(
     output,
     STRIDE,
     K: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     row = tl.program_id(0).to(tl.int64)
     slot = tl.arange(0, K)
     end = tl.load(ends + row)
@@ -93,7 +98,13 @@ def _select_tokens(
     if bounds is None:
         ends = torch.empty((rows,), device=logits.device, dtype=torch.int32)
         _prefill_topk_bounds_kernel[(triton.cdiv(rows, 256),)](
-            visible, ends, rows, width, visible.stride(0), 256
+            visible,
+            ends,
+            rows,
+            width,
+            visible.stride(0),
+            256,
+            **launch_options(visible),
         )
     else:
         ends = bounds[1]
@@ -121,7 +132,12 @@ def _select_tokens(
 def finish_tokens(logits, ends, output):
     """Finish a previously qualified raw selection with the original predicate."""
     _prefill_topk_finite_kernel[(logits.shape[0],)](
-        logits, ends, output, logits.stride(0), output.shape[1]
+        logits,
+        ends,
+        output,
+        logits.stride(0),
+        output.shape[1],
+        **launch_options(logits),
     )
     return output
 

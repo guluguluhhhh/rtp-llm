@@ -9,6 +9,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41._pdl import launch_options, pdl_sync
+
 # Per-score allocation budget, fixed at import; not a total forward-memory cap.
 try:
     _MAX_LOGITS_BYTES = int(
@@ -89,7 +91,9 @@ def _grouped_score_bounds_kernel(
     KEY_SPAN,
     WIDTH,
     RATIO: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     _write_score_bounds(
         positions,
         request_ids,
@@ -116,7 +120,9 @@ def _all_grouped_score_bounds_kernel(
     REQUESTS,
     GROUPS,
     RATIO: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     tile = tl.program_id(0)
     lower = tl.full((), 0, tl.int32)
     upper = GROUPS
@@ -178,7 +184,10 @@ def _bounds_descriptors(layout):
 
 
 @triton.jit(do_not_specialize=["WIDTH", "STRIDE"])
-def _mask_tail_kernel(logits, ends, WIDTH, STRIDE, TILE: tl.constexpr):
+def _mask_tail_kernel(
+    logits, ends, WIDTH, STRIDE, TILE: tl.constexpr, USE_PDL: tl.constexpr = False
+):
+    pdl_sync(USE_PDL)
     row = tl.program_id(0).to(tl.int64)
     end = tl.load(ends + row)
     offsets = tl.arange(0, TILE)
@@ -394,6 +403,7 @@ class _GroupedScores:
                     len(self.layout),
                     self.ratio,
                     num_warps=4,
+                    **launch_options(self.positions),
                 )
                 vectors = output.split(
                     tuple(n for n in self.group_rows for _ in range(4))
@@ -425,6 +435,7 @@ class _GroupedScores:
                     group.width,
                     self.ratio,
                     num_warps=4,
+                    **launch_options(self.positions),
                 )
                 starts, ends, zeros, visible = output.unbind(0)
                 bounds.append((rows, starts, ends, zeros, visible))
@@ -489,7 +500,12 @@ class _GroupedScores:
             )
             if mask_tail:
                 _mask_tail_kernel[(logits.shape[0],)](
-                    logits, visible, group.width, logits.stride(0), 256
+                    logits,
+                    visible,
+                    group.width,
+                    logits.stride(0),
+                    256,
+                    **launch_options(logits),
                 )
             yield rows, logits, visible, (zeros, visible)
             del logits

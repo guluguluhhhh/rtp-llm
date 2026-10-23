@@ -130,6 +130,7 @@ class MHCPreNormFn(torch.autograd.Function):
         norm_eps: float,
         fuse_grad_acc: bool,
         n_splits: int,
+        enable_pdl: bool = False,
     ) -> torch.Tensor:
         assert x.dtype == torch.bfloat16
         assert fn.dtype == torch.float32
@@ -166,7 +167,7 @@ class MHCPreNormFn(torch.autograd.Function):
         fn = round_to_tf32(fn)
 
         fwd_mul_kernel = _mhc_pre_norm_fn_fwd_mul(
-            mhc_mult3, n_splits, mhc_hidden_size // n_splits
+            mhc_mult3, n_splits, mhc_hidden_size // n_splits, enable_pdl=enable_pdl
         )
         fwd_mul_kernel(
             x.view(-1, mhc_hidden_size),
@@ -185,6 +186,7 @@ class MHCPreNormFn(torch.autograd.Function):
             mhc_hidden_size,
             norm_eps,
             n_splits,
+            enable_pdl=enable_pdl,
         )
         fwd_norm_kernel(
             out_mul_splitted.view(n_splits, -1, 1, mhc_mult3),
@@ -255,12 +257,19 @@ def mhc_pre_norm_fn(
     mhc_norm_eps: float,
     fuse_grad_acc: bool = True,
     n_splits: int = 16,
+    enable_pdl: bool = False,
 ) -> torch.Tensor:
     if not torch.is_grad_enabled() and not torch.compiler.is_compiling():
         if mhc_norm_weight is not None:
             mhc_fn = _MHCFnNormwMerge.forward(None, mhc_fn, mhc_norm_weight)
         return MHCPreNormFn.forward(
-            None, residual, mhc_fn, mhc_norm_eps, fuse_grad_acc, n_splits
+            None,
+            residual,
+            mhc_fn,
+            mhc_norm_eps,
+            fuse_grad_acc,
+            n_splits,
+            enable_pdl=enable_pdl,
         )
     if mhc_norm_weight is not None:
         mhc_fn = _MHCFnNormwMerge.apply(mhc_fn, mhc_norm_weight)

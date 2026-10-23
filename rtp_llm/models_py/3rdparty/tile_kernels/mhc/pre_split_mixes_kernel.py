@@ -14,6 +14,7 @@ def _mhc_pre_split_mixes_fwd(
     mhc_pre_eps: float,
     token_block_size: int,
     dtype: T.dtype = T.float32,
+    enable_pdl: bool = False,
 ) -> tilelang.JITKernel:
     num_tokens = T.dynamic("num_tokens")
 
@@ -32,6 +33,8 @@ def _mhc_pre_split_mixes_fwd(
         comb_res_mix: T.Tensor[(num_tokens, mhc_mult2), dtype],
     ) -> None:
         with T.Kernel(T.ceildiv(num_tokens, token_block_size)) as pid:
+            if enable_pdl:
+                T.pdl_sync()
             input_mixes_frag = T.alloc_fragment((token_block_size, mhc_mult3), dtype)
             pre_layer_mix_frag = T.alloc_fragment((token_block_size, mhc_mult), dtype)
             post_layer_mix_frag = T.alloc_fragment((token_block_size, mhc_mult), dtype)

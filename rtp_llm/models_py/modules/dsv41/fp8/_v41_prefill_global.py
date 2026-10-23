@@ -23,6 +23,7 @@ import triton
 import triton.language as tl
 import triton.language.extra.cuda.libdevice as libdevice
 
+from rtp_llm.models_py.modules.dsv41._pdl import launch_options, pdl_sync
 from rtp_llm.models_py.modules.dsv41.fp8._trap_utils import (
     invalid_kv_access_validation_enabled,
     trap_invalid_kv_access_enabled,
@@ -199,7 +200,9 @@ def _prefill_compress_main_kernel(
     BLOCKS,
     TRAP: tl.constexpr,
     REDUCE_WIDTH: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     row = tl.program_id(0).to(tl.int64)
     token = tl.load(boundary_indices + row).to(tl.int64)
     columns = tl.arange(0, 512)
@@ -268,7 +271,9 @@ def _prefill_state_store_kernel(
     STATE_STRIDE: tl.constexpr,
     STATE_ROWS,
     TRAP: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     row = tl.program_id(0).to(tl.int64)
     slot = tl.load(slots + row).to(tl.int64)
     if slot >= 0:
@@ -301,7 +306,9 @@ def _prefill_index_store_kernel(
     BLOCKS,
     NATIVE_NORM: tl.constexpr,
     TRAP: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     row = tl.program_id(0).to(tl.int64)
     slot = tl.load(slots + row).to(tl.int64)
     if slot >= 0:
@@ -429,6 +436,7 @@ def compress_main(
         min(128, 512 // min(1 << (count.bit_length() - 1), 16)),
         num_warps=4,
         enable_fp_fusion=False,
+        **launch_options(values),
     )
     return output
 
@@ -459,6 +467,7 @@ def store_states(values, scores, state_slots, state_pool):
             state_pool.shape[0],
             trap_invalid_kv_access_enabled(),
             num_warps=4,
+            **launch_options(values),
         )
     return True
 
@@ -498,5 +507,6 @@ def store_index(projected, norm, eps, positions, freqs, index_pool, index_slots,
             trap_invalid_kv_access_enabled(),
             num_warps=4,
             enable_fp_fusion=False,
+            **launch_options(projected),
         )
     return True

@@ -21,6 +21,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41._pdl import launch_options, pdl_sync
+
 if TYPE_CHECKING:
     from rtp_llm.models_py.modules.dsv41.fp8._swa_cp_byte_sliced import (
         CPByteSlicedSlotCompaction,
@@ -74,7 +76,9 @@ def _quantize_and_insert_swa_kernel(
     fresh_out=None,
     fresh_slots=None,
     STORE_FRESH: tl.constexpr = False,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     row = tl.program_id(0).to(tl.int64)
     columns = tl.arange(0, 512)
     if STORE_FRESH:
@@ -162,8 +166,15 @@ def _load_swa_row(
 
 @triton.jit(do_not_specialize=["block_stride", "out_stride"])
 def _dequantize_swa_kernel(
-    pool, slots, out, block_stride, out_stride, ENTRIES: tl.constexpr
+    pool,
+    slots,
+    out,
+    block_stride,
+    out_stride,
+    ENTRIES: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     row = tl.program_id(0).to(tl.int64)
     slot = tl.load(slots + row)
     values = _load_swa_row(pool, slot, block_stride, ENTRIES)
@@ -197,7 +208,9 @@ def _gather_swa_kernel(
     compact_blocks=0,
     local_bytes=0,
     RANK_MAJOR: tl.constexpr = False,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     batch = tl.program_id(0).to(tl.int64)
     column = tl.program_id(1).to(tl.int64)
     if lengths is not None:
@@ -235,6 +248,7 @@ def quantize_and_insert_swa_k_cache(
         pool_3d.stride(0),
         ENTRIES=pool_3d.shape[1],
         num_warps=4,
+        **launch_options(kv),
     )
 
 
@@ -259,6 +273,7 @@ def dequantize_swa_k_cache(
             out.stride(0),
             ENTRIES=pool_3d.shape[1],
             num_warps=4,
+            **launch_options(pool_3d),
         )
     return out
 
@@ -289,6 +304,7 @@ def dequantize_and_gather_k_cache_slots(
             offset,
             ENTRIES=k_cache.shape[1],
             num_warps=4,
+            **launch_options(k_cache),
         )
 
 
@@ -313,6 +329,7 @@ def _gather_swa_rank_major(
             local_bytes=local_bytes,
             RANK_MAJOR=True,
             num_warps=4,
+            **launch_options(gathered),
         )
 
 
@@ -434,6 +451,7 @@ def quantize_and_insert_k_cache_cp_byte_sliced(
             fresh_slots=fresh_slots,
             STORE_FRESH=fresh_out is not None,
             num_warps=4,
+            **launch_options(k),
         )
         return
     full_stride = local_bytes * cp_size

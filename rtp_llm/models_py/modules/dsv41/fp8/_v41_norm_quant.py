@@ -15,6 +15,9 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41._pdl import enabled as pdl_enabled
+from rtp_llm.models_py.modules.dsv41._pdl import launch_options, pdl_sync
+
 _READY = set()
 _LOCK = threading.Lock()
 
@@ -49,7 +52,18 @@ def _fma_ftz(a, b, c):
 
 
 @triton.jit(do_not_specialize=["scale_stride", "eps", "legacy"])
-def _v41_norm_quant_kernel(x, weight, norm, quant, scales, scale_stride, eps, legacy):
+def _v41_norm_quant_kernel(
+    x,
+    weight,
+    norm,
+    quant,
+    scales,
+    scale_stride,
+    eps,
+    legacy,
+    USE_PDL: tl.constexpr = False,
+):
+    pdl_sync(USE_PDL)
     row = tl.program_id(0).to(tl.int64)
     col = tl.arange(0, 8192)
     value = tl.load(x + row * 5120 + col, col < 5120, 0).to(tl.float32)
@@ -193,6 +207,7 @@ def rmsnorm_group32_quant(
             legacy,
             num_warps=4,
             enable_fp_fusion=False,
+            **launch_options(x),
         )
     return out_norm, quant, scales
 
@@ -210,12 +225,13 @@ def warmup(device):
     with torch.cuda.device(device), _LOCK:
         if torch.cuda.is_current_stream_capturing():
             raise RuntimeError("V41 norm quant warmup must precede CUDA graph capture")
-        if device.index in _READY:
+        key = (device.index, pdl_enabled(device))
+        if key in _READY:
             return True
         x = torch.zeros((1, 5120), dtype=torch.bfloat16, device=device)
         weight = torch.ones(5120, dtype=torch.bfloat16, device=device)
         for mode in ("legacy", "v2"):
             rmsnorm_group32_quant(x, weight, quant_kernel=mode, out_norm=x)
         torch.cuda.current_stream(device).synchronize()
-        _READY.add(device.index)
+        _READY.add(key)
     return True

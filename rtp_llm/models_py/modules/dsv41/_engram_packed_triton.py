@@ -11,6 +11,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41._pdl import launch_options, pdl_sync
+
 
 @triton.jit(do_not_specialize=["tokens", "packed_stride", "scale_stride"])
 def _unpack_packed_rows_kernel(
@@ -23,10 +25,12 @@ def _unpack_packed_rows_kernel(
     HEADS: tl.constexpr,
     DIM: tl.constexpr,
     BLOCK: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
     # A virtual K padded to 128 lets each four-scale word have one writer,
     # including a partial final word. Four-row padding is written in this same
     # launch, so TMA never reads uninitialized scale bytes beyond the last row.
+    pdl_sync(USE_PDL)
     K: tl.constexpr = HEADS * DIM
     GROUPS: tl.constexpr = K // 32
     PACKED_K: tl.constexpr = triton.cdiv(K, 128) * 128
@@ -120,5 +124,6 @@ def unpack_packed_rows(packed, heads: int, dim: int):
             DIM=dim,
             BLOCK=block,
             num_warps=4,
+            **launch_options(packed),
         )
     return values, scales

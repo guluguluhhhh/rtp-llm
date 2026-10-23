@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from functools import partial
 from itertools import product
 
+from rtp_llm.models_py.modules.dsv41._pdl import launch_options
+
 _WARMED: set[tuple] = set()
 
 
@@ -906,7 +908,8 @@ def _warm_candidate_topk(device):
     from . import _v41_candidate_topk_v3
 
     if not any(
-        _v41_candidate_topk_v3.is_available(phase, device) for phase in ("prefill", "decode")
+        _v41_candidate_topk_v3.is_available(phase, device)
+        for phase in ("prefill", "decode")
     ):
         return
     scores = torch.zeros((1, 4096), dtype=torch.float32, device=device)
@@ -942,6 +945,7 @@ def _warm_grouped_bounds(attn, device):
             4,
             attn.compress_ratio,
             num_warps=4,
+            **launch_options(positions),
         )
 
 
@@ -1095,6 +1099,7 @@ def _warm_indexer_layout(
                 width,
                 attn.compress_ratio,
                 num_warps=4,
+                **launch_options(grouped_positions),
             )
 
             grouped_logits = fp8_fp4_mqa_indexer_score(
@@ -1109,7 +1114,12 @@ def _warm_indexer_layout(
                 return_bf16=return_bf16,
             )
             _mask_tail_kernel[(rows,)](
-                grouped_logits, bounds[1], width, grouped_logits.stride(0), 256
+                grouped_logits,
+                bounds[1],
+                width,
+                grouped_logits.stride(0),
+                256,
+                **launch_options(grouped_logits),
             )
             del grouped_logits
         if attn.index_topk == 512:
@@ -1434,6 +1444,7 @@ def warmup_v41_attention_jit(
     """Prewarm reachable variants; a later cache-bearing call completes pools."""
     import torch
 
+    from rtp_llm.models_py.modules.dsv41._pdl import enabled as pdl_enabled
     from rtp_llm.models_py.modules.dsv41.dsv4_kernel_jit_warmup import (
         _assert_not_capturing,
         _run_deepgemm_warmup_launch_with_retry,
@@ -1450,7 +1461,7 @@ def warmup_v41_attention_jit(
         return
     attentions = _collect_attentions(v4)
     stream = torch.cuda.current_stream(device)
-    prefix = (device.index, stream.cuda_stream)
+    prefix = (device.index, stream.cuda_stream, pdl_enabled(device))
 
     def run(key, fn, deepgemm=False):
         key = prefix + key

@@ -10,13 +10,14 @@ class MHCPreApplyMix(torch.autograd.Function):
         x: torch.Tensor,
         mix: torch.Tensor,
         out: torch.Tensor | None,
+        enable_pdl: bool = False,
     ) -> torch.Tensor:
         if ctx is not None:
             ctx.save_for_backward(x, mix)
         h = x.shape[-1]
         mhc = mix.shape[-2]
         assert mix.shape[-1] == 1
-        fwd_kernel = _mhc_pre_apply_mix_fwd(mhc, h)
+        fwd_kernel = _mhc_pre_apply_mix_fwd(mhc, h, enable_pdl=enable_pdl)
         if out is None:
             out = torch.empty(*x.shape[:-2], h, dtype=torch.bfloat16, device=x.device)
         fwd_kernel(x.view(-1, mhc, h), mix.view(-1, mhc), out.view(-1, h))
@@ -54,7 +55,8 @@ def mhc_pre_apply_mix(
     x: torch.Tensor,
     mix: torch.Tensor,
     out: torch.Tensor | None = None,
+    enable_pdl: bool = False,
 ) -> torch.Tensor:
     if not torch.is_grad_enabled() and not torch.compiler.is_compiling():
-        return MHCPreApplyMix.forward(None, x, mix, out)
+        return MHCPreApplyMix.forward(None, x, mix, out, enable_pdl=enable_pdl)
     return MHCPreApplyMix.apply(x, mix, out)

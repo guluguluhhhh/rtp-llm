@@ -43,6 +43,7 @@ def _cpu_module():
         _MAX_GROUP_ROWS=65536,
         _MAX_PACK_PROJECTIONS=512,
         legacy=SimpleNamespace(_enabled=lambda tensor: False),
+        launch_options=lambda tensor: {"USE_PDL": False},
         CSA_STATE="csa_state",
         INDEXER_KV="indexer_kv",
         require_pool_tokens_per_block=lambda cache, region: (

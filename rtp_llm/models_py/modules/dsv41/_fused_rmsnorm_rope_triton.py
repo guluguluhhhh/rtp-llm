@@ -16,6 +16,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41._pdl import launch_options, pdl_sync
+
 _BLACKWELL_GROUP_HEADS8_MIN_FREQ = 65536
 
 
@@ -49,12 +51,14 @@ def _fused_rmsnorm_rope_kernel(
     EPS: tl.constexpr,
     HAS_WEIGHT: tl.constexpr,
     BLOCK_D: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
     # Cast pid to int64 BEFORE the row-stride multiply: the prefill Q
     # site flattens [B, S, H, D] to [B*S*H, D], so N can exceed 2^22 and
     # ``pid * x_stride_n`` silently overflows int32 (e.g. S=65600 H=64
     # D=512: max pid * stride = 4198399 * 512 = 2.15B > INT32_MAX →
     # CUDA_ERROR_ILLEGAL_ADDRESS).  Same pitfall as v4_rmsnorm.
+    pdl_sync(USE_PDL)
     pid = tl.program_id(0).to(tl.int64)
     # Tokens per freq slot — decouples the kernel from decode/prefill layout:
     #   decode Q  [B, 1, H, D] + freqs [B, RD/2]     -> freq_stride_n = H
@@ -125,7 +129,9 @@ def _fused_rmsnorm_rope_group_heads_kernel(
     HAS_WEIGHT: tl.constexpr,
     BLOCK_D: tl.constexpr,
     GROUP_HEADS: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     freq_idx = tl.program_id(0).to(tl.int64)
     head_tile = tl.program_id(1).to(tl.int64)
     row_start = freq_idx * freq_stride_n + head_tile * GROUP_HEADS
@@ -273,6 +279,7 @@ def fused_rmsnorm_rope(
             BLOCK_D=BLOCK_D,
             GROUP_HEADS=selected_group_heads,
             num_warps=4 if BLOCK_D <= 512 else 8,
+            **launch_options(x_flat),
         )
     else:
         _fused_rmsnorm_rope_kernel[(N,)](
@@ -294,5 +301,6 @@ def fused_rmsnorm_rope(
             HAS_WEIGHT=has_weight,
             BLOCK_D=BLOCK_D,
             num_warps=4 if BLOCK_D <= 512 else 8,
+            **launch_options(x_flat),
         )
     return out_flat.view(*orig_shape)

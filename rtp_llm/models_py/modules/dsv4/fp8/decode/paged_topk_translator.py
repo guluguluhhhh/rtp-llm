@@ -51,6 +51,7 @@ def translate_local_to_global_slots(
     local_idx: torch.Tensor,  # [T, K] int32, -1 sentinel preserved
     entries_per_block: int,
     tokens_per_block_for_block_table: int,
+    enable_pdl: bool = False,
 ) -> torch.Tensor:
     """[T, K] int32 global pool slot ids; -1 propagates as -1.
 
@@ -75,4 +76,5 @@ def translate_local_to_global_slots(
         TOKENS_PER_BLOCK_FOR_BLOCK_TABLE=int(tokens_per_block_for_block_table),
         NUM_TOPK_TOKENS=K,
         BLOCK_N=block_n,
+        enable_pdl=enable_pdl,
     )

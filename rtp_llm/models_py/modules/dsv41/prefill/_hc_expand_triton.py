@@ -4,6 +4,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41._pdl import launch_options, pdl_sync
+
 
 @triton.jit
 def _expand_hc_kernel(
@@ -11,7 +13,9 @@ def _expand_hc_kernel(
     output,
     tokens: tl.constexpr,
     width: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     rows = (tl.program_id(0) * 4 + tl.arange(0, 4)).to(tl.int64)
     cols = tl.program_id(1) * 512 + tl.arange(0, 512)
     valid = (rows[:, None] < tokens) & (cols[None, :] < width)
@@ -28,6 +32,11 @@ def expand_hc(source: torch.Tensor) -> torch.Tensor:
     tokens, width = source.shape
     output = torch.empty((tokens, 4, width), device=source.device, dtype=source.dtype)
     _expand_hc_kernel[(triton.cdiv(tokens, 4), triton.cdiv(width, 512))](
-        source, output, tokens, width, num_warps=4
+        source,
+        output,
+        tokens,
+        width,
+        num_warps=4,
+        **launch_options(source),
     )
     return output

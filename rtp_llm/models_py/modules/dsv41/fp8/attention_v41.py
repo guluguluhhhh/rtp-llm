@@ -18,6 +18,7 @@ from rtp_llm.models_py.modules.dsv4.fp8._cp_slot_mapping import (
     cp_kv_slot_mapping,
     cp_state_slot_mapping,
 )
+from rtp_llm.models_py.modules.dsv41._pdl import launch_options
 from rtp_llm.models_py.modules.dsv41._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv41._rope_only_triton import rope_only_inplace
 from rtp_llm.models_py.modules.dsv41.attn_type import (
@@ -567,7 +568,12 @@ def _apply_prefill_candidates(
                 from ._v41_grouped_prefill_score import _mask_tail_kernel
 
                 _mask_tail_kernel[(logits.shape[0],)](
-                    logits, visible, logits.shape[1], logits.stride(0), 256
+                    logits,
+                    visible,
+                    logits.shape[1],
+                    logits.stride(0),
+                    256,
+                    **launch_options(logits),
                 )
             block_ids = select_candidate_blocks(
                 logits.float(), visible, block_size, topk
@@ -1100,7 +1106,9 @@ class AttentionV41FP8(AttentionFP8):
     def _begin_forward(self):
         if self.layer_id == min(self._shared_attention["layers"]):
             for key in (
-                "prefill_pool_ready", "prefill_state_ready", "decode_sparse_plan_ready"
+                "prefill_pool_ready",
+                "prefill_state_ready",
+                "decode_sparse_plan_ready",
             ):
                 pending = self._shared_attention.pop(key, None)
                 if pending is not None:
@@ -2195,7 +2203,12 @@ class AttentionV41FP8(AttentionFP8):
                             from ._v41_grouped_prefill_score import _mask_tail_kernel
 
                             _mask_tail_kernel[(logits.shape[0],)](
-                                logits, visible, logits.shape[1], logits.stride(0), 256
+                                logits,
+                                visible,
+                                logits.shape[1],
+                                logits.stride(0),
+                                256,
+                                **launch_options(logits),
                             )
                         scores, selected = logits.topk(k, dim=-1)
                         selected = torch.where(scores.isfinite(), selected, -1).int()
@@ -2923,7 +2936,8 @@ class AttentionV41FP8(AttentionFP8):
             else:
                 weights = (
                     F.linear(x.reshape(T, -1), self.index_weights)
-                    if head_weights is None else head_weights
+                    if head_weights is None
+                    else head_weights
                 )
             return None, weights, index_prepared
         if index_q is None and paged and self.rope_head_dim == 64 and overlap is None:
@@ -2937,7 +2951,8 @@ class AttentionV41FP8(AttentionFP8):
             if pair is not None:
                 weights = (
                     F.linear(x.reshape(T, -1), self.index_weights)
-                    if head_weights is None else head_weights
+                    if head_weights is None
+                    else head_weights
                 )
                 scaled = torch.empty_like(weights, dtype=torch.bfloat16)
                 torch.mul(
@@ -2971,7 +2986,8 @@ class AttentionV41FP8(AttentionFP8):
         else:
             weights = (
                 F.linear(x.reshape(T, -1), self.index_weights)
-                if head_weights is None else head_weights
+                if head_weights is None
+                else head_weights
             )
         prepared = None
         if paged:
@@ -3015,8 +3031,15 @@ class AttentionV41FP8(AttentionFP8):
         capacity = keys.capacity if paged else keys.shape[1]
         if prepared_query is None:
             prepared_query = AttentionV41FP8._prepare_indexer_query_decode(
-                self, x, qr, positions, qr_quantized, index_q,
-                head_weights, index_prepared, overlap=overlap,
+                self,
+                x,
+                qr,
+                positions,
+                qr_quantized,
+                index_q,
+                head_weights,
+                index_prepared,
+                overlap=overlap,
             )
         q, weights, prepared = prepared_query
         if q is not None:
@@ -3120,7 +3143,13 @@ class AttentionV41FP8(AttentionFP8):
                 weights.float() * (self.index_head_dim * self.index_n_heads) ** -0.5
             )
             freqs = self.freqs_cis[positions]
-            q = fp4_roundtrip(rope_only(q.view(T, self.index_n_heads, self.index_head_dim), freqs, self.rope_head_dim))
+            q = fp4_roundtrip(
+                rope_only(
+                    q.view(T, self.index_n_heads, self.index_head_dim),
+                    freqs,
+                    self.rope_head_dim,
+                )
+            )
         publish = (
             self.layer_id == candidate_source
             and candidate_blocks > 0
@@ -3165,11 +3194,16 @@ class AttentionV41FP8(AttentionFP8):
                             if overlap is None
                             else overlap.select_candidates
                         )
-                        complete_prefix = (
-                            candidate_size == 8 and candidate_blocks in (512, 1024, 2048)
+                        complete_prefix = candidate_size == 8 and candidate_blocks in (
+                            512,
+                            1024,
+                            2048,
                         )
                         candidates, flags = select_candidates(
-                            all_logits, visible_i32, candidate_size, candidate_blocks,
+                            all_logits,
+                            visible_i32,
+                            candidate_size,
+                            candidate_blocks,
                             **({"complete": True} if complete_prefix else {}),
                         )
                         shared["candidates"] = candidates
@@ -3183,8 +3217,13 @@ class AttentionV41FP8(AttentionFP8):
                         # Reuse the source's int32 lengths; plan/metadata need
                         # no data produced by the later reindex layer.
                         start_plan(
-                            self, keys, visible_i32, query_len=S,
-                            producer_stream=None if overlap is None else overlap.auxiliary,
+                            self,
+                            keys,
+                            visible_i32,
+                            query_len=S,
+                            producer_stream=(
+                                None if overlap is None else overlap.auxiliary
+                            ),
                         )
                     elif candidate_source >= 0 and self.layer_id > candidate_source:
                         decode_topk.mask_candidates(
@@ -3274,6 +3313,8 @@ class AttentionV41FP8(AttentionFP8):
 
     def _decode_global_slots(self, selected, req):
         """Translate compressed indices without materializing token positions."""
+        from rtp_llm.models_py.modules.dsv41._pdl import enabled as pdl_enabled
+
         region = self._global_region()
         pool = self._source_pool(region)
         table = self._block_tables_by_type[region]
@@ -3301,6 +3342,7 @@ class AttentionV41FP8(AttentionFP8):
                 selected,
                 entries_per_block=pool.shape[1],
                 tokens_per_block_for_block_table=logical_entries,
+                enable_pdl=pdl_enabled(selected.device),
             )
         slots = self._slots(
             region,
@@ -3401,7 +3443,11 @@ class AttentionV41FP8(AttentionFP8):
                 self._decode_write_swa_fp8(qkv.kv, B, S, metadata)
             if global_work is not None:
                 prepared_query = self._prepare_indexer_query_decode(
-                    x, qkv.qr, positions, qkv.qr_quantized, qkv.index_q,
+                    x,
+                    qkv.qr,
+                    positions,
+                    qkv.qr_quantized,
+                    qkv.index_q,
                     getattr(qkv, "head_weights", None),
                     getattr(qkv, "index_prepared", None),
                 )

@@ -6,6 +6,7 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41._pdl import launch_options, pdl_sync
 from rtp_llm.models_py.modules.dsv41.attn_type import INDEXER_KV
 
 # Excludes final BF16 KV and earlier groups' retained index outputs. Those
@@ -26,8 +27,16 @@ def _trim_rows(tensor, count):
 
 @triton.jit(do_not_specialize=["FIRST", "STOP", "ROWS", "END_STRIDE"])
 def _pool_row_metadata_kernel(
-    seq_ends, output, FIRST, STOP, ROWS, END_STRIDE, RATIO: tl.constexpr
+    seq_ends,
+    output,
+    FIRST,
+    STOP,
+    ROWS,
+    END_STRIDE,
+    RATIO: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     ids = tl.arange(0, 128)
     counts = (
         tl.load(seq_ends + (FIRST + ids) * END_STRIDE, FIRST + ids < STOP, other=0)
@@ -64,6 +73,7 @@ def _group_row_metadata(seq_ends, first, stop, rows, ratio):
             seq_ends.stride(0),
             ratio,
             num_warps=4,
+            **launch_options(seq_ends),
         )
     return output.unbind(0)
 

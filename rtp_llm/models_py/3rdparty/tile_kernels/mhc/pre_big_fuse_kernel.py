@@ -22,6 +22,7 @@ def _mhc_pre_big_fuse(
     n_splits: int = 16,
     mhc_mult: int = 4,
     delayed: bool = False,
+    enable_pdl: bool = False,
 ):
     num_tokens = T.dynamic("num_tokens")
     mhc_mult3 = mhc_mult * (2 + mhc_mult)
@@ -42,6 +43,8 @@ def _mhc_pre_big_fuse(
         layer_input: T.Tensor[(num_tokens, hidden_size), T.bfloat16],
     ) -> None:
         with T.Kernel(num_tokens, threads=96) as pid:
+            if enable_pdl:
+                T.pdl_sync()
             ##################################################################
             # _mhc_pre_norm_fn_fwd_norm
             mixes_shared = T.alloc_shared(mhc_mult3, T.float32)

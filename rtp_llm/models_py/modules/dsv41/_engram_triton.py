@@ -5,6 +5,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41._pdl import launch_options, pdl_sync
+
 
 @triton.jit
 def _hash_windows_kernel(
@@ -26,7 +28,9 @@ def _hash_windows_kernel(
     BLOCK_T: tl.constexpr,
     BLOCK_H: tl.constexpr,
     HAS_DEAD_MASK: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     token = tl.program_id(0) * BLOCK_T + tl.arange(0, BLOCK_T)
     layer = tl.program_id(1)
     head = tl.arange(0, BLOCK_H)
@@ -84,6 +88,7 @@ def hash_token_windows(windows, dead_mask, buffers, layout, pad_id):
         BLOCK_H=triton.next_power_of_2(layout.n_heads),
         HAS_DEAD_MASK=dead_mask is not None,
         num_warps=4,
+        **launch_options(windows),
     )
     return output
 
@@ -103,7 +108,9 @@ def _lookup_host_kernel(
     QUANT_BLOCK: tl.constexpr,
     BLOCK_R: tl.constexpr,
     GRID: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     columns = tl.arange(0, DIM)
     for base in tl.range(tl.program_id(0) * BLOCK_R, rows, GRID * BLOCK_R):
         row = base + tl.arange(0, BLOCK_R)
@@ -217,6 +224,7 @@ def _lookup_host_rows(
         BLOCK_R=block_rows,
         GRID=grid,
         num_warps=num_warps,
+        **launch_options(indices),
     )
     if prepare and _prepare_prefetch_kernel(kernel):
         # Exercise the configured function before readiness is published.

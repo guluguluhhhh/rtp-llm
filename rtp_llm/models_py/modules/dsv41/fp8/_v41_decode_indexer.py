@@ -19,6 +19,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41._pdl import launch_options, pdl_sync
+
 if TYPE_CHECKING:
     from ._indexer_score import PagedMQAMetadata
 
@@ -59,7 +61,9 @@ def _fused_decode_metadata_kernel(
     STRIDE0: tl.constexpr,
     STRIDE1: tl.constexpr,
     BLOCK: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     token = tl.program_id(0).to(tl.int64)
     request = token // QUERY_LEN
     length = ((tl.load(positions + token).to(tl.int64) + 1) // RATIO).to(tl.int32)
@@ -171,6 +175,7 @@ def get_decode_metadata(
         table.stride(1),
         triton.next_power_of_2(table.shape[1]),
         num_warps=4,
+        **launch_options(positions),
     )
     schedule = _deep_gemm.get_paged_mqa_logits_metadata(
         physical_lengths, pool.shape[1], num_sms, indices=requests
@@ -198,7 +203,9 @@ def _prepare_paged_metadata_kernel(
     LOGICAL: tl.constexpr,
     PHYSICAL: tl.constexpr,
     BLOCK: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     row = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     length = tl.load(logical_ptr + row, row < ROWS, other=0)
     last = tl.maximum(length - 1, 0)
@@ -230,7 +237,9 @@ def _compact_logits_kernel(
     LOGICAL: tl.constexpr,
     PHYSICAL: tl.constexpr,
     BLOCK: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     row = tl.program_id(0)
     col = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
     length = tl.load(lengths_ptr + row)
@@ -266,6 +275,7 @@ def _compact_logits_bounded_kernel(
     LOGICAL: tl.constexpr,
     PHYSICAL: tl.constexpr,
     BLOCK: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
     """Length-bounded compaction: one CTA per row, dynamic loop over visible
     columns, no stores beyond context_lens.
@@ -282,6 +292,7 @@ def _compact_logits_bounded_kernel(
     physical row for every col < CAPACITY, block-zero reads are safe by the
     sentinel design, and the block<=0 zero restoration happens in registers.
     """
+    pdl_sync(USE_PDL)
     row = tl.program_id(0)
     length = tl.minimum(tl.load(lengths_ptr + row), CAPACITY)
     table_base = safe_table_ptr + (row // QUERY_LEN) * TABLE_COLS
@@ -505,6 +516,7 @@ def score_decode_indexer(
             logical_entries,
             block_size,
             128,
+            **launch_options(lengths),
         )
     else:
         lengths = metadata.lengths
@@ -546,6 +558,7 @@ def score_decode_indexer(
             logical_entries,
             block_size,
             1024,
+            **launch_options(logits),
         )
     else:
         # 8192-column tiles benchmarked fastest at production decode shapes
@@ -564,5 +577,6 @@ def score_decode_indexer(
             block_size,
             8192,
             num_warps=8,
+            **launch_options(logits),
         )
     return compact

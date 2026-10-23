@@ -24,6 +24,7 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41._pdl import launch_options, pdl_sync
 from rtp_llm.models_py.modules.dsv41._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv41.fp8._swa_cp_byte_sliced import (
     CPByteSlicedSlotCompaction,
@@ -104,10 +105,12 @@ def _dequantize_and_gather_k_kernel(
     fp8_max: tl.constexpr,
     n_quant_blocks: tl.constexpr,
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
     """One program per (request, worker); workers stripe across the gathered
     tokens in the request. Mirrors vLLM's kernel exactly — see the V4 paper
     or vLLM's cache_utils.py for the math."""
+    pdl_sync(USE_PDL)
     batch_idx = tl.program_id(0)
     worker_id = tl.program_id(1)
     num_workers = tl.num_programs(1)
@@ -240,6 +243,7 @@ def dequantize_and_gather_k_cache(
         fp8_max=FP8_MAX,
         n_quant_blocks=NOPE_TILES,
         TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
+        **launch_options(out),
     )
 
 
@@ -293,12 +297,14 @@ def _dequantize_and_gather_k_slots_kernel(
     n_quant_blocks: tl.constexpr,
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
     CP_RANK_MAJOR_RAW: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
     """Gather/dequant using pre-translated flat global slot ids.
 
     ``slot < 0`` is the sentinel used by writers and metadata builders; it
     zero-fills the output row and never touches the cache pointer.
     """
+    pdl_sync(USE_PDL)
     batch_idx = tl.program_id(0)
     worker_id = tl.program_id(1)
     num_workers = tl.num_programs(1)
@@ -428,6 +434,7 @@ def _launch_dequantize_and_gather_k_slots_unchecked(
         n_quant_blocks=NOPE_TILES,
         TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
         CP_RANK_MAJOR_RAW=bool(cp_rank_major_raw),
+        **launch_options(out),
     )
 
 
@@ -583,6 +590,7 @@ def _gather_k_cache_packed_kernel(
     token_data_size: tl.constexpr,
     scale_dim: tl.constexpr,
     block_stride,
+    USE_PDL: tl.constexpr = False,
 ):
     """Gather paged FP8 cache into true per-token packed slots.
 
@@ -590,6 +598,7 @@ def _gather_k_cache_packed_kernel(
     scales at the end of the block. The output layout is compact per token:
     ``[448 fp8 NoPE | 128 bf16 RoPE | 8 UE8M0 scale]``.
     """
+    pdl_sync(USE_PDL)
     batch_idx = tl.program_id(0)
     worker_id = tl.program_id(1)
     num_workers = tl.num_programs(1)
@@ -671,6 +680,7 @@ def gather_k_cache_packed(
         token_data_size=TOKEN_DATA_SIZE,
         scale_dim=SCALE_BYTES_PER_TOKEN,
         block_stride=k_cache.stride(0),
+        **launch_options(out),
     )
 
 
@@ -708,8 +718,10 @@ def _gather_k_cache_packed_to_flat_kernel(
     entry_bytes: tl.constexpr,
     BATCH_BLOCK: tl.constexpr,
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
     """Gather grouped cache bytes directly into padded rank-local flat order."""
+    pdl_sync(USE_PDL)
     token_idx = tl.program_id(0).to(tl.int64)
     if token_idx >= total_local_tokens:
         return
@@ -871,6 +883,7 @@ def try_gather_k_cache_packed_to_flat(
         BATCH_BLOCK=batch_block,
         TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
         num_warps=4,
+        **launch_options(out),
     )
     return True
 
@@ -887,7 +900,9 @@ def _dequantize_packed_k_cache_flat_kernel(
     token_data_size: tl.constexpr,
     entry_bytes: tl.constexpr,
     n_quant_blocks: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     token_idx = tl.program_id(0)
     if token_idx >= n_tokens:
         return
@@ -948,8 +963,10 @@ def _restore_dequantize_scatter_packed_k_cache_flat_kernel(
     entry_bytes: tl.constexpr,
     n_quant_blocks: tl.constexpr,
     BATCH_BLOCK: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
     """Restore, dequantize, and scatter one packed row per program."""
+    pdl_sync(USE_PDL)
     token_idx = tl.program_id(0)
     if token_idx >= n_tokens:
         return
@@ -1018,6 +1035,7 @@ def dequantize_packed_k_cache_flat(out: torch.Tensor, packed: torch.Tensor) -> N
         token_data_size=TOKEN_DATA_SIZE,
         entry_bytes=ENTRY_BYTES,
         n_quant_blocks=NOPE_TILES,
+        **launch_options(out),
     )
 
 
@@ -1086,6 +1104,7 @@ def try_restore_dequantize_scatter_packed_k_cache_flat(
         n_quant_blocks=NOPE_TILES,
         BATCH_BLOCK=batch_block,
         num_warps=4,
+        **launch_options(out),
     )
     return True
 
@@ -1175,8 +1194,10 @@ def _dequantize_slots_kernel(
     num_cache_blocks,
     n_quant_blocks: tl.constexpr,  # 7
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
     """One program per output slot. Sentinel slots (slot < 0) write zeros."""
+    pdl_sync(USE_PDL)
     pid = tl.program_id(0)
     slot = tl.load(slot_indices_ptr + pid)
 
@@ -1258,6 +1279,7 @@ def dequantize_slots_to_bf16(
         num_cache_blocks=int(pool_3d.shape[0]),
         n_quant_blocks=NOPE_TILES,
         TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
+        **launch_options(out),
     )
     return out
 

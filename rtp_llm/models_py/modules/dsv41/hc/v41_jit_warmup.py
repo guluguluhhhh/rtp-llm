@@ -28,6 +28,7 @@ from functools import partial
 import torch
 
 from rtp_llm.models_py.modules.dsv41 import dsv4_kernel_jit_warmup as common
+from rtp_llm.models_py.modules.dsv41._pdl import enabled as pdl_enabled
 from rtp_llm.models_py.modules.dsv41.hc import v41_mega_mhc, v41_prenorm
 from rtp_llm.models_py.modules.dsv41.hc.delayed import (
     DelayedHCUnit,
@@ -192,23 +193,50 @@ def _launch_small_prenorm(unit, tokens, device):
 
 def _launch_tilelang_norm(unit, tokens, device):
     residual = torch.ones((1, tokens, 4, unit.dim), dtype=torch.bfloat16, device=device)
-    _tile_ops().mhc_pre_norm_fn(residual, unit.fn, None, unit.norm_eps, n_splits=1)
+    _tile_ops().mhc_pre_norm_fn(
+        residual,
+        unit.fn,
+        None,
+        unit.norm_eps,
+        n_splits=1,
+        enable_pdl=pdl_enabled(residual.device),
+    )
 
 
 def _launch_tilelang_chain(unit, tokens, device, *, include_norm):
     ops = _tile_ops()  # Initializes TileLang/libz3/TVM environment before imports.
     residual = torch.ones((1, tokens, 4, unit.dim), dtype=torch.bfloat16, device=device)
     mixes = (
-        ops.mhc_pre_norm_fn(residual, unit.fn, None, unit.norm_eps, n_splits=1)
+        ops.mhc_pre_norm_fn(
+            residual,
+            unit.fn,
+            None,
+            unit.norm_eps,
+            n_splits=1,
+            enable_pdl=pdl_enabled(residual.device),
+        )
         if include_norm
         else torch.zeros((1, tokens, 24), dtype=torch.float32, device=device)
     )
     pre, post, comb = ops.mhc_pre_split_mixes(
-        mixes, unit.scale, unit.base, 4, 2.0, unit.hc_eps
+        mixes,
+        unit.scale,
+        unit.base,
+        4,
+        2.0,
+        unit.hc_eps,
+        enable_pdl=pdl_enabled(residual.device),
     )
-    comb = ops.sinkhorn_normalize(comb, repeat=unit.hc_sinkhorn_iters, eps=unit.hc_eps)
+    comb = ops.sinkhorn_normalize(
+        comb,
+        repeat=unit.hc_sinkhorn_iters,
+        eps=unit.hc_eps,
+        enable_pdl=pdl_enabled(residual.device),
+    )
     # The delayed collapse/final head uses this same apply_mix specialization.
-    hidden = ops.mhc_pre_apply_mix(residual, pre)
+    hidden = ops.mhc_pre_apply_mix(
+        residual, pre, enable_pdl=pdl_enabled(residual.device)
+    )
     ops.mhc_post(hidden, residual, post, comb, out=residual)
 
 
@@ -228,6 +256,7 @@ def _launch_fused_pre(unit, tokens, device):
         unit.hc_sinkhorn_iters,
         previous_pre_mix=previous,
         gemm_backend="deepgemm" if use_deepgemm else None,
+        enable_pdl=pdl_enabled(residual.device),
     )
 
 
@@ -320,6 +349,7 @@ def warmup_v41_hc_jit(v4, *, max_m, device):
         tuple(sorted(tile_ms.items())),
         fused_enabled,
         os.environ.get("DSV4_MHC_PRE_GEMM_BACKEND", ""),
+        pdl_enabled(device),
     )
     if key in _WARMED_KEYS:
         return

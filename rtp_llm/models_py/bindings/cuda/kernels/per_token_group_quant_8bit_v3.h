@@ -10,6 +10,9 @@ namespace rtp_llm {
 // Input/Q pointers must be 16-byte aligned; input, Q and S byte spans
 // (including S padding) must not overlap. M=0 is a no-op.
 // Matches legacy quantization's 1e-10 scale floor; not v2's tiny-value policy.
-void per_token_group_quant_fp8_v3(const at::Tensor& input, at::Tensor& output_q, at::Tensor& output_s);
+void per_token_group_quant_fp8_v3(const at::Tensor& input,
+                                  at::Tensor&       output_q,
+                                  at::Tensor&       output_s,
+                                  bool              enable_pdl = false);
 
 }  // namespace rtp_llm

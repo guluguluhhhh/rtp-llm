@@ -10,6 +10,8 @@ try:
     import triton
     import triton.language as tl
 
+    from rtp_llm.models_py.modules.dsv41._pdl import launch_options, pdl_sync
+
     _TRITON_AVAILABLE = True
 except Exception:  # pragma: no cover - CPU-only environments
     triton = None
@@ -112,7 +114,9 @@ if _TRITON_AVAILABLE:
         cp_size,
         owner_block_size,
         BLOCK: tl.constexpr,
+        USE_PDL: tl.constexpr = False,
     ):
+        pdl_sync(USE_PDL)
         offsets = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK).to(
             tl.int64
         )
@@ -143,7 +147,9 @@ if _TRITON_AVAILABLE:
         batch_size,
         BATCH_BLOCK: tl.constexpr,
         BLOCK: tl.constexpr,
+        USE_PDL: tl.constexpr = False,
     ):
+        pdl_sync(USE_PDL)
         offsets = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK).to(
             tl.int64
         )
@@ -187,7 +193,9 @@ if _TRITON_AVAILABLE:
         request_ids_ptr,
         total_tokens,
         BLOCK: tl.constexpr,
+        USE_PDL: tl.constexpr = False,
     ):
+        pdl_sync(USE_PDL)
         offsets = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK).to(
             tl.int64
         )
@@ -206,7 +214,9 @@ if _TRITON_AVAILABLE:
         batch_size,
         BATCH_BLOCK: tl.constexpr,
         BLOCK: tl.constexpr,
+        USE_PDL: tl.constexpr = False,
     ):
+        pdl_sync(USE_PDL)
         offsets = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK).to(
             tl.int64
         )
@@ -265,7 +275,9 @@ if _TRITON_AVAILABLE:
         BATCH_BLOCK: tl.constexpr,
         B64_LOOP_UNROLL: tl.constexpr,
         BLOCK: tl.constexpr,
+        USE_PDL: tl.constexpr = False,
     ):
+        pdl_sync(USE_PDL)
         offsets = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK).to(
             tl.int64
         )
@@ -431,6 +443,7 @@ def try_build_cp_restore_indices(
             int(owner_block_size),
             BLOCK=_BLOCK_SIZE,
             num_warps=4,
+            **launch_options(out),
         )
     else:
         _cp_restore_varlen_kernel[grid](
@@ -444,6 +457,7 @@ def try_build_cp_restore_indices(
             BATCH_BLOCK=_batch_block(batch_size),
             BLOCK=_BLOCK_SIZE,
             num_warps=4,
+            **launch_options(lengths),
         )
     return out
 
@@ -477,6 +491,7 @@ def try_build_cp_full_prefill_positions(
             total_tokens,
             BLOCK=_BLOCK_SIZE,
             num_warps=4,
+            **launch_options(prefixes),
         )
     else:
         _cp_positions_varlen_kernel[grid](
@@ -489,6 +504,7 @@ def try_build_cp_full_prefill_positions(
             BATCH_BLOCK=_batch_block(batch_size),
             BLOCK=_BLOCK_SIZE,
             num_warps=4,
+            **launch_options(lengths),
         )
     return positions, request_ids
 
@@ -582,6 +598,7 @@ def try_build_cp_forward_metadata(
         B64_LOOP_UNROLL=_FORWARD_B64_LOOP_UNROLL,
         BLOCK=_BLOCK_SIZE,
         num_warps=4,
+        **launch_options(lengths),
     )
     return (
         relative_positions,

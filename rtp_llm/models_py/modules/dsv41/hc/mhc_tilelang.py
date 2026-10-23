@@ -33,6 +33,8 @@ from typing import NoReturn, Tuple
 
 import torch
 
+from rtp_llm.models_py.modules.dsv41._pdl import enabled as pdl_enabled
+
 # Lazy-imported callables (populated on first successful import).
 _tk_mhc_pre = None
 _tk_mhc_post = None
@@ -199,6 +201,7 @@ def tk_mhc_pre(
             pre_eps=pre_eps,
             sinkhorn_eps=sinkhorn_eps,
             sinkhorn_repeat=sinkhorn_iters,
+            enable_pdl=pdl_enabled(residual.device),
         )
         return out, post_mix, comb_mix
     except Exception as e:

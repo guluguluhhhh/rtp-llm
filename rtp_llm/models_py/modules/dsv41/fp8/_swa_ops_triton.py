@@ -30,6 +30,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41._pdl import launch_options, pdl_sync
+
 # Mirror vLLM's combined-topk row alignment (kernel tile width).
 _SPARSE_PREFILL_TOPK_ALIGNMENT = 128
 
@@ -55,6 +57,7 @@ def _compute_prefill_gather_lens_kernel(
     num_decodes,
     window_size,
     BLOCK_SIZE: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
     """Single-pass compute of per-prefill ``gather_len``.
 
@@ -68,6 +71,7 @@ def _compute_prefill_gather_lens_kernel(
     query at sequence position p reuses at most win-1 prefix tokens
     (positions p-win+1 .. p-1), so gathering more than that is wasted.
     """
+    pdl_sync(USE_PDL)
     offset = tl.arange(0, BLOCK_SIZE)
     mask = offset < num_prefills
 
@@ -110,6 +114,7 @@ def compute_prefill_gather_lens(
         num_decodes,
         window_size,
         BLOCK_SIZE=block_size,
+        **launch_options(out),
     )
     return out
 
@@ -131,6 +136,7 @@ def _compute_window_topk_and_length_varlen_kernel(
     window_size: tl.constexpr,
     BLOCK_T: tl.constexpr,
     BLOCK_W: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
     """Build varlen SWA cold-path topk metadata in one launch.
 
@@ -144,6 +150,7 @@ def _compute_window_topk_and_length_varlen_kernel(
     This is the fused equivalent of ``_get_window_topk_idxs_varlen`` plus the
     ``topk_length_kv_full`` math in ``_build_swa_prefill_meta_varlen``.
     """
+    pdl_sync(USE_PDL)
     rows = tl.program_id(0) * BLOCK_T + tl.arange(0, BLOCK_T)
     cols = tl.arange(0, BLOCK_W)
     row_mask = rows < num_tokens
@@ -253,6 +260,7 @@ def compute_window_topk_and_length_varlen(
         window_size=window_size,
         BLOCK_T=block_t,
         BLOCK_W=block_w,
+        **launch_options(topk_idxs),
     )
     return topk_idxs, topk_length
 
@@ -277,6 +285,7 @@ def _compute_swa_slot_mapping_kernel(
     tokens_per_block_for_block_table: tl.constexpr,
     ring_entries: tl.constexpr,
     BLOCK_M: tl.constexpr,  # tokens per program
+    USE_PDL: tl.constexpr = False,
 ):
     """One program per (request, BLOCK_M chunk-of-tokens).
 
@@ -295,6 +304,7 @@ def _compute_swa_slot_mapping_kernel(
     the same physical block map to ``-1`` so concurrent prefill writes do not
     race on the small ring.
     """
+    pdl_sync(USE_PDL)
     batch_idx = tl.program_id(0).to(tl.int64)
     chunk_idx = tl.program_id(1)
 
@@ -381,6 +391,7 @@ def compute_swa_slot_mapping(
         tokens_per_block_for_block_table=tokens_per_block_for_block_table,
         ring_entries=ring_entries,
         BLOCK_M=BLOCK_M,
+        **launch_options(slot_mapping),
     )
     return slot_mapping
 
@@ -399,8 +410,10 @@ def _compute_swa_slot_mapping_from_positions_kernel(
     tokens_per_block_for_block_table: tl.constexpr,
     ring_entries: tl.constexpr,
     BLOCK_M: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
     """Map independent token positions to the final writable SWA ring tails."""
+    pdl_sync(USE_PDL)
     offsets = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
     in_token_range = offsets < num_tokens
 
@@ -484,6 +497,7 @@ def compute_swa_slot_mapping_from_positions(
         tokens_per_block_for_block_table=tokens_per_block_for_block_table,
         ring_entries=ring_entries,
         BLOCK_M=BLOCK_M,
+        **launch_options(slot_mapping),
     )
     return slot_mapping
 
@@ -502,7 +516,9 @@ def _compute_swa_cp_sliced_slot_mapping_kernel(
     cp_rank: tl.constexpr,
     cp_size: tl.constexpr,
     BLOCK_M: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     batch_idx = tl.program_id(0).to(tl.int64)
     chunk_idx = tl.program_id(1)
 
@@ -593,6 +609,7 @@ def compute_swa_cp_sliced_slot_mapping(
         cp_rank=cp_rank,
         cp_size=cp_size,
         BLOCK_M=BLOCK_M,
+        **launch_options(slot_mapping),
     )
     return slot_mapping
 
@@ -613,7 +630,9 @@ def _compute_swa_slot_in_flat_kernel(
     base_offset,
     window_size: tl.constexpr,
     BLOCK_M: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     rows = tl.program_id(0).to(tl.int64) * BLOCK_M + tl.arange(0, BLOCK_M)
     mask = rows < num_tokens
     req = tl.load(req_id_per_token_ptr + rows, mask=mask, other=0).to(tl.int64)
@@ -679,6 +698,7 @@ def compute_swa_slot_in_flat(
         int(base_offset),
         window_size=int(window_size),
         BLOCK_M=block_m,
+        **launch_options(out),
     )
     return out
 
@@ -703,7 +723,9 @@ def _compute_swa_slot_in_flat_from_cu_kernel(
     num_reqs,
     BLOCK_B: tl.constexpr,
     BLOCK_M: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     rows = tl.program_id(0).to(tl.int64) * BLOCK_M + tl.arange(0, BLOCK_M).to(tl.int64)
     mask = rows < num_tokens
     b = tl.arange(0, BLOCK_B)
@@ -776,6 +798,7 @@ def compute_swa_slot_in_flat_from_cu(
         num_reqs,
         BLOCK_B=block_b,
         BLOCK_M=block_m,
+        **launch_options(out),
     )
     return out
 
@@ -810,6 +833,7 @@ def _combine_topk_swa_indices_kernel(
     WINDOW_SIZE: tl.constexpr,
     PADDED_TOP_K: tl.constexpr,
     PADDED_WINDOW_SIZE: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
     """Per-query layout of ``[combined_topk]`` row in the gathered workspace.
 
@@ -826,6 +850,7 @@ def _combine_topk_swa_indices_kernel(
                                                           - gather_start) + arange
             where gather_start = seq_len - gather_len
     """
+    pdl_sync(USE_PDL)
     batch_idx = tl.program_id(0)
     worker_id = tl.program_id(1)
     num_workers = tl.num_programs(1)
@@ -967,6 +992,7 @@ def combine_topk_swa_indices(
         WINDOW_SIZE=window_size,
         PADDED_TOP_K=padded_top_k,
         PADDED_WINDOW_SIZE=padded_window_size,
+        **launch_options(combined_indices),
     )
     return combined_indices, combined_lens
 
@@ -1003,6 +1029,7 @@ def _combine_topk_swa_indices_cp_kernel(
     BLOCK_T: tl.constexpr,
     BLOCK_C: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
     """CP-aware fused combine.
 
@@ -1011,6 +1038,7 @@ def _combine_topk_swa_indices_cp_kernel(
     kernel consumes explicit per-row ``global_positions`` and optionally
     per-row request ids / per-request prefixes for varlen B>1.
     """
+    pdl_sync(USE_PDL)
     block_t = tl.program_id(0)
     block_c = tl.program_id(1)
     rows = block_t * BLOCK_T + tl.arange(0, BLOCK_T)
@@ -1206,5 +1234,6 @@ def combine_topk_swa_indices_cp_prepared(
         BLOCK_C=BLOCK_C,
         IS_VARLEN=bool(is_varlen),
         num_warps=4,
+        **launch_options(combined_indices),
     )
     return combined_indices, combined_lens

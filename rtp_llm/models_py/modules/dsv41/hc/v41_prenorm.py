@@ -13,6 +13,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41._pdl import launch_options, pdl_sync
+
 
 @lru_cache(maxsize=1)
 def _has_prenorm_gemm() -> bool:
@@ -91,7 +93,9 @@ def _reduce_prenorm_kernel(
     TOKENS: tl.constexpr,
     SPLITS: tl.constexpr,
     EPS: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
 ):
+    pdl_sync(USE_PDL)
     token = tl.program_id(0)
     columns = tl.arange(0, 32)
     projection = tl.full((32,), 0, tl.float32)
@@ -144,5 +148,6 @@ def prenorm(
         eps,
         num_warps=4,
         enable_fp_fusion=False,
+        **launch_options(partial),
     )
     return output

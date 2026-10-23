@@ -17,6 +17,8 @@ from unittest import mock
 
 import torch
 
+from rtp_llm.models_py.modules.dsv41._pdl import enabled as pdl_enabled
+
 _ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -269,6 +271,7 @@ class WoAQuantCPUContractTest(unittest.TestCase):
 
         def quantize(flat, **kwargs):
             self.assertTrue(flat.is_contiguous())
+            self.assertFalse(kwargs["enable_pdl"])
             result = flat.clone()
             captured.append((flat, result))
             return result, object()
@@ -409,7 +412,7 @@ class WoAQuantCPUContractTest(unittest.TestCase):
             for node in ast.parse(path.read_text()).body
             if isinstance(node, ast.ClassDef) and node.name == "V41MXFP8Linear"
         )
-        namespace = {"torch": torch}
+        namespace = {"torch": torch, "pdl_enabled": pdl_enabled}
         exec(
             compile(ast.Module(body=[cls], type_ignores=[]), str(path), "exec"),
             namespace,
